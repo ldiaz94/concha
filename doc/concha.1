@@ -1,0 +1,1763 @@
+.Dd October 1, 2026
+.Dt CONCHA 1
+.Os
+.Sh NAME
+.Nm concha
+.Nd a Unix shell whose scripting language is Pascal
+.Sh SYNOPSIS
+.Nm
+.Op Fl il
+.Nm
+.Ar script
+.Op Ar arg ...
+.Nm
+.Fl c
+.Ar text
+.Op Ar arg ...
+.Nm
+.Fl n
+.Op Ar script
+.Nm
+.Fl q Cm check | Cm outline
+.Ar script
+.Nm
+.Fl q Cm words | Cm def
+.Ar script : Ns Ar line : Ns Ar column
+.Sh DESCRIPTION
+A tour for people who already use a Unix shell is
+.Xr concha-tutorial 7 .
+This page is the complete reference.
+.Pp
+.Nm
+runs commands the way the Bourne shell does: pipes, redirections,
+heredocs,
+.Cm && ,
+.Cm ||
+and
+.Cm & .
+Everything else is Pascal: variables, expressions, control flow and
+routines.
+Values are never split into words or globbed a second time.
+.Pp
+With no arguments and a terminal on standard input,
+.Nm
+is interactive: it reads
+.Pa ~/.concharc ,
+then prompts for lines with editing and history
+.Pq Sx "LINE EDITING" .
+Given a
+.Ar script ,
+it runs that file.
+With
+.Fl c ,
+it runs
+.Ar text .
+If standard input is not a terminal, it reads standard input as a
+script.
+In each case the remaining arguments go into the list
+.Ev args .
+.Pp
+Terminals and login programs may put
+.Fl l ,
+.Fl i
+or both, as
+.Fl il ,
+before any of these.
+.Fl l
+asks for a login shell, which
+.Nm
+always is: it reads
+.Pa ~/.concharc
+and no profile.
+.Fl i
+makes the shell interactive even when standard input is not a
+terminal, without line editing.
+A first line beginning with
+.Cm #!
+is ignored.
+.Pp
+A script is parsed completely before it runs, so a syntax error
+anywhere means nothing runs.
+With
+.Fl n ,
+.Nm
+only parses
+.Ar script ,
+or standard input if there is none: it reports the first syntax error
+and runs nothing, like
+.Ql sh -n .
+Its message gives the column as well as the line, counted in bytes
+from 1, of the token the error is about
+.Pq the opening quote of a string left open :
+.Dl concha: deploy.cn:12:9: expected 'then'
+An unknown routine is not a syntax error, so it goes unreported.
+.Pp
+.Fl q
+asks a query about
+.Ar script ,
+or standard input if it is
+.Ql - ,
+for an editor or a language server to read.
+Like
+.Fl n ,
+it opens nothing but
+.Ar script
+and runs nothing.
+The queries are listed in
+.Sx QUERIES .
+.Sh STATEMENTS AND COMMANDS
+Each statement is one of two kinds, and the start of the line decides
+which:
+.Bl -bullet
+.It
+a keyword
+.Pq Cm begin , if , while , repeat , for , case , var , export , procedure , function , break , continue , exit ,
+an assignment
+.Pq Cm "x :=" No or Cm "x[i] :=" ,
+a call written with a parenthesis right after the name
+.Pq Cm f( ,
+or
+.Ic write ,
+.Ic writeln
+or
+.Ic halt
+standing alone:
+the statement is
+.Em Pascal ;
+.It
+anything else is a
+.Em command .
+.El
+.Pp
+A newline or
+.Cm \&;
+ends a command.
+So does a bare, unquoted
+.Cm end , else
+or
+.Cm until
+that closes an open
+.Cm begin , if , case
+or
+.Cm repeat ,
+which lets commands sit inside Pascal:
+.Bd -literal -offset indent
+if exists('Makefile') then make else echo nothing to do
+.Ed
+.Pp
+Where nothing is open for it to close, the word is an ordinary
+argument, so
+.Cm "echo the end"
+prints
+.Sq the end .
+.Pp
+A line ending in
+.Cm \&| , \&|& , &&
+or
+.Cm \&|| ,
+or a backslash before the newline, continues the command on the next
+line.
+Pascal statements may span lines freely, and the
+.Cm \&;
+between them is optional.
+.Pp
+Comments are
+.Cm //
+to the end of the line, or
+.Cm "{ ... }" .
+In a command,
+.Cm //
+starts a comment only at the beginning of a word, and braces are
+ordinary characters, so
+.Cm "find . -exec rm {} \e;"
+works.
+After a call or a statement, where no word can follow, braces are a
+comment again.
+.Sh COMMAND WORDS
+A command is a list of words.
+A word is built from any of these parts, joined with no spaces between
+them:
+.Bl -tag -width "`pipeline`XX"
+.It Ar text
+Literal.
+The characters
+.Cm "* ? [ ..."
+make it a glob pattern.
+.It Sq Ar text
+A Pascal string, taken literally.
+Write
+.Cm \&''
+for a quote.
+.It Do Ar text Dc
+An interpolated string: expands
+.Cm $ Ns Ar name ,
+.Cm ${ Ns Ar name Ns Cm }
+and
+.Cm $( Ns Ar expr Ns Cm \&) .
+.Cm \e\(dq , \e\e , \e$
+and
+.Cm \e\&`
+escape.
+.It Cm $ Ns Ar name , Cm ${ Ns Ar name Ns Cm }
+The value of a variable.
+The braces end the name where a letter follows:
+.Cm \(dq${HOME}x\(dq .
+.It Cm $( Ns Ar expr Ns Cm \&)
+The value of any expression.
+.It Cm \&` Ns Ar list Ns Cm \&`
+The standard output of a list of statements, separated by
+.Cm \&;
+or newlines, without trailing newlines.
+The list runs in a child process, so its assignments do not reach the
+shell.
+.It Cm <( Ns Ar list Ns Cm \&)
+Process substitution: a word of its own, with blanks or line ends on
+both sides, never a part of a longer one:
+.Cm "x<(true)"
+is a syntax error, and
+.Cm "3<(list)"
+is no process substitution but an fd redirection, descriptor 3 read from
+the file
+.Pa (list) .
+The list runs in a child process with its standard output on a pipe,
+and the word becomes
+.Pa /dev/fd/ Ns Ar n ,
+the pipe's read end, for the command to open as a file:
+.Cm "diff <(sort a) <(sort b)" .
+It works for procedures, builtins and redirections alike
+.Pq Cm "cat < <(ls)" .
+Under job control the lists join the command's job, its process group,
+so that they can read the terminal.
+Once the command, or the pipeline it stands in, has finished, the read
+end is closed and the child waited for; its status is not the
+command's, and
+.Cm errexit
+ignores it.
+Inside, an unquoted
+.Cm \&)
+ends a word, so quote one that is meant.
+Only this input form exists; there is no
+.Cm >( Ns Ar list Ns Cm \&) .
+With a space,
+.Cm "< (" ,
+it is a redirection from a file whose name starts with
+.Cm \&( .
+.It Cm ~ , ~ Ns Ar user
+At the start of a word, before a
+.Cm /
+or the end of the word:
+the value of
+.Ev HOME ,
+or the home directory of
+.Ar user
+as
+.Pa /etc/passwd
+gives it.
+When there is no such user, the word is left as it is.
+As in
+.Xr sh 1 ,
+in a word that starts
+.Ar name Ns Cm = ,
+with
+.Ar name
+an identifier, the same holds right after that
+.Cm =
+and after any unquoted
+.Cm \&: ,
+where a
+.Cm \&:
+may also end it:
+.Cm env CONFIG=~/.cfg cmd
+and
+.Cm PATH=~/bin:~/.local/bin
+expand.
+Quoted, or anywhere else in a word,
+.Cm ~
+is literal.
+.It Cm \e Ns Ar c
+The character
+.Ar c ,
+taken literally.
+.El
+.Pp
+A word expands to exactly one argument, with one exception: a word
+that is only an unquoted
+.Cm $ Ns Ar name
+or
+.Cm $( Ns Ar expr Ns Cm \&)
+whose value is a list becomes one argument per item.
+Values are never re-split on blanks and never re-globbed.
+Use
+.Fn split
+or
+.Fn lines
+when splitting is wanted.
+.Pp
+Globbing applies only to unquoted literal text.
+Patterns use
+.Cm "* ? [abc] [a-z]"
+and
+.Cm [!abc] .
+Names starting with a dot match only a pattern that starts with a dot.
+Matches are sorted.
+A pattern that matches nothing is an error.
+.Pp
+The first word names the command.
+.Nm
+looks for, in order: a user procedure or function, a builtin command,
+and then an executable along
+.Ev PATH .
+If
+.Ev PATH
+is unset or empty,
+.Pa /usr/local/bin:/usr/bin:/bin
+is searched instead.
+An executable file that the system cannot run, such as a script with
+no
+.Cm #!
+line, is run by
+.Pa /bin/sh .
+Arguments reach external programs as strings: integers in decimal,
+booleans as
+.Cm true
+or
+.Cm false ,
+.Cm nil
+as the empty string.
+.Sh REDIRECTION
+.Bl -tag -width "n<file, n>file, n>>fileXX"
+.It Cm < Ns Ar file
+Standard input from
+.Ar file .
+.It Cm > Ns Ar file
+Standard output to
+.Ar file ,
+truncating it.
+.It Cm >> Ns Ar file
+Standard output appended to
+.Ar file .
+.It Cm n< Ns Ar file , n> Ns Ar file , n>> Ns Ar file
+The same for descriptor
+.Ar n .
+.It Cm n>& Ns Ar m
+Descriptor
+.Ar n
+becomes a copy of
+.Ar m ,
+as in
+.Cm 2>&1 .
+Without
+.Ar n
+it is 1, so
+.Cm >&2
+sends standard output to standard error.
+.It Cm &> Ns Ar file
+Standard output and standard error to
+.Ar file .
+.It Cm <<< Ns Ar word
+Standard input is
+.Ar word
+followed by a newline.
+.It Cm << Ns Ar tag
+A heredoc.
+.El
+.Pp
+Write messages to standard error with
+.Cm >&2 ,
+as in
+.Ql writeln('error') >&2 ,
+not with
+.Cm > Ns Pa /dev/stderr .
+The second opens the file again, so when standard error is a file, as
+under
+.Ql 2> Ns Ar log
+or
+.Ql &> Ns Ar log ,
+it empties it and writes over what was there; with
+.Cm >>
+the message itself is written over instead.
+.Cm >&2
+shares the descriptor, and its place in the file, with the shell.
+.Xr sh 1
+behaves the same way.
+.Pp
+A heredoc's body starts on the line after the command and ends at a
+line holding only
+.Ar tag .
+The terminator may be indented: whatever indentation precedes it is
+also removed from every line of the body.
+The body expands
+.Cm $ Ns Ar name ,
+.Cm ${ Ns Ar name Ns Cm }
+and
+.Cm $( Ns Ar expr Ns Cm \&)
+unless the tag is quoted
+.Pq Cm <<'EOF' ,
+in which case it is taken literally.
+.Pp
+Redirections apply to every kind of command, including builtins,
+procedures and blocks:
+.Cm "writeln(x) > f"
+and
+.Cm "begin ... end <<EOF"
+both work.
+A file that can't be opened prints the reason and sets
+.Ev status
+to 1; the script continues.
+.Sh PIPELINES AND LISTS
+.Bl -tag -width "a && bXXXX"
+.It Ar a No \&| Ar b
+Standard output of
+.Ar a
+to standard input of
+.Ar b .
+The status is that of
+.Ar b ,
+or see
+.Ev pipefail .
+.It Ar a No |& Ar b
+Short for
+.Ar a No 2>&1 | Ar b :
+standard error goes down the pipe too.
+.It Ar a No && Ar b
+Run
+.Ar b
+if
+.Ar a
+succeeded.
+.It Ar a No || Ar b
+Run
+.Ar b
+if
+.Ar a
+failed.
+.It Ar a No &
+Run in the background.
+Its process id goes into
+.Ev lastpid .
+It is a process group of its own, and
+.Dv SIGHUP ,
+.Dv SIGTERM ,
+.Dv SIGUSR1
+or
+.Dv SIGUSR2
+sent to that process reaches every command in it, so
+.Ql kill $lastpid
+stops a whole pipeline or block;
+.Ql wait $lastpid
+then gives 128 plus the signal.
+Any other signal reaches only that process unless sent to the group,
+as in
+.Ql kill -KILL -- -$lastpid .
+In an interactive shell it is a job, announced with its number and
+process id, and again when it finishes or stops; see
+.Sx JOB CONTROL .
+In a script its standard input is
+.Pa /dev/null .
+.El
+.Pp
+A pipeline stage can be a command, a call
+.Pq Cm f(x) ,
+a
+.Cm begin ... end
+block, or an
+.Cm if , while , for , repeat
+or
+.Cm case
+statement:
+.Bd -literal -offset indent
+printf 'a\enb\en' | while readln(l) do writeln('> ', l)
+begin echo b; echo a end | sort > sorted
+.Ed
+.Pp
+A single stage runs inside the shell, except for external programs, so
+procedures and blocks can change variables.
+Stages of a longer pipeline each run in their own process.
+.Sh VALUES
+Every value is one of:
+.Cm nil ,
+a boolean
+.Pq Cm true , false ,
+a 64-bit integer, a string of bytes, or a list
+.Pq Cm "[1, 'two', [3]]" .
+Assignment copies; two variables never share a value.
+.Pp
+String literals are Pascal's:
+.Cm 'it''s' ,
+with
+.Cm # Ns Ar n
+for a character code, as in
+.Cm 'a'#10'b' .
+Strings index from 1
+.Pq Cm s[1] ,
+lists from 0
+.Pq Cm l[0] .
+.Sh EXPRESSIONS
+Operators, from the highest precedence to the lowest (Pascal's
+precedence):
+.Bd -literal -offset indent
+not, unary -
+* div mod and
++ - or xor
+= <> < > <= >= in
+.Ed
+.Pp
+Comparisons therefore need parentheses around each side:
+.Cm "(a = 1) and (b = 2)" .
+.Pp
+.Cm +
+adds two integers, joins lists (a non-list operand is added as one
+item), and otherwise concatenates the operands as strings.
+.Cm - , * , div
+and
+.Cm mod
+accept strings that hold numbers, so
+.Cm "int(`wc -l < f`) + 1"
+and
+.Cm "`nproc` * 2"
+both work.
+There is no
+.Cm / .
+Integer arithmetic that would not fit in 64 bits, and a number too big
+to hold, is an error,
+.Dq integer overflow ,
+never a wrapped result.
+.Pp
+.Cm =
+compares values of the same kind.
+An integer equals a string holding the same number, and
+.Cm nil
+equals the empty string.
+Ordering compares numerically when either side is an integer, and
+byte by byte for two strings.
+.Ar x No in Ar list
+tests membership, and
+.Ar s No in Ar t
+tests for a substring.
+.Pp
+.Cm and
+and
+.Cm or
+short-circuit.
+Conditions must be booleans: an integer or string condition is an
+error, not a guess.
+.Pp
+.Cm \&` Ns Ar list Ns Cm \&`
+in an expression gives the list's output as a string and sets
+.Ev status
+to the status of its last command.
+.Cm \(dq...\(dq
+interpolates just as it does in a command.
+.Sh STATEMENTS
+.Bd -literal -offset indent
+var x := e, y
+x := e
+l[i] := e
+begin statements end
+if c then s else s
+while c do s
+repeat statements until c
+for i := a to b do s
+for i := a downto b do s
+for x in list do s
+case e of v1, v2: s; lo..hi: s else statements end
+export NAME := e
+export NAME
+break
+continue
+exit
+exit(e)
+.Ed
+.Pp
+Pascal type annotations are accepted and ignored:
+.Cm "var i: integer" .
+.Cm otherwise
+is a synonym for
+.Cm else
+in
+.Cm case .
+.Cm for No ... Cm in
+requires a list, so use
+.Cm "lines(`...`)"
+to loop over the lines of output.
+Case labels are compared with
+.Cm = ;
+a range
+.Ar lo Ns Cm .. Ns Ar hi
+matches when
+.Ar lo No <= Ar e No <= Ar hi ,
+ordered as by
+.Cm < ,
+and never matches a value that cannot be ordered against it:
+.Bd -literal -offset indent
+case c of
+  '0'..'9': writeln('digit');
+  'a'..'z', '_': writeln('name')
+end
+.Ed
+.Sh ROUTINES
+.Bd -literal -offset indent
+procedure greet(name, greeting);
+begin
+  writeln(greeting, ', ', name)
+end;
+
+function sq(x);
+var y;
+begin
+  y := x * x;
+  result := y
+end;
+.Ed
+.Pp
+A routine is defined when its definition runs, and defining it again
+replaces it.
+Calls can be Pascal style,
+.Cm "greet('bob', 'hi')" ,
+or command style,
+.Cm "greet bob hi" .
+A Pascal-style call to a name that is not a routine is an error,
+.Dq unknown routine ,
+naming the one close misspelling if there is exactly one
+.Pq Dq did you mean ... ;
+command style instead looks for a builtin command and then an
+executable along
+.Ev PATH ,
+as described in
+.Sx COMMAND WORDS .
+If none is found, the error is
+.Dq not found ;
+at the interactive prompt it also names the one close misspelling among
+builtin commands, procedures and programs along
+.Ev PATH ,
+if there is exactly one.
+Command-style arguments are strings, except that a word that is just
+.Cm $ Ns Ar name
+passes the value unchanged.
+Missing parameters are
+.Cm nil .
+Every call also receives the full argument list in the local variable
+.Ev args .
+.Pp
+Inside a routine, new variables are local.
+Assigning to an existing global changes the global.
+Routines cannot see their callers' locals.
+A function returns
+.Ev result .
+.Ic exit
+leaves the routine.
+.Cm exit( Ns Ar e Ns Cm )
+sets
+.Ev result
+in a function and
+.Ev status
+anywhere else.
+Recursion is limited to a depth of 400.
+.Pp
+Called as a command, a procedure's status is the last command status
+it left; it starts at 0.
+A procedure named
+.Ic prompt
+draws the interactive prompt.
+.Sh VARIABLES AND ENVIRONMENT
+The environment is imported at startup as exported global string
+variables.
+Only exported variables reach child processes, converted to strings.
+Reading a variable that does not exist is an error, naming the one
+close misspelling among locals and globals if there is exactly one;
+test with
+.Fn defined name .
+An exported variable whose name is known only as the script runs is
+read with
+.Fn getenv ,
+set with
+.Fn setenv
+and removed with
+.Ic unset ;
+.Fn environ
+lists them.
+.Pp
+Variables the shell sets:
+.Bl -tag -width "errexit, pipefail" -offset indent
+.It Ev args
+List of the script's arguments, or of the current routine's arguments.
+.It Ev status
+Exit status of the last command.
+.It Ev errexit , pipefail
+Both
+.Cm false .
+Set to
+.Cm true
+to stop on failure; see
+.Sx STATUS .
+.It Ev lastpid
+Process id of the last background job, 0 before the first.
+.It Ev pid
+Process id of the shell, like
+.Cm $$
+in
+.Xr sh 1 .
+It is read-only, and a child process started by a capture or a
+pipeline sees the same value.
+.It Ev PWD
+Current directory, updated by
+.Ic cd .
+.It Ev OLDPWD
+Previous directory, set by
+.Ic cd
+and read by
+.Cm "cd -" .
+.It Ev black , red , green , yellow , blue , magenta , cyan , white , bold , dim , reset
+Escape sequences for the terminal's basic colours, bold, dim and back
+to normal, for use in a prompt:
+.Dl write(red, status, reset, ' ')
+When colour is off
+.Pq Sx ENVIRONMENT
+they are empty strings.
+They are ordinary variables and may be reassigned.
+.El
+.Sh STATUS
+After every command or pipeline,
+.Ev status
+holds its exit code: 0 for success, and 128+n if signal
+.Ar n
+killed it.
+It is 127 when a command is not found and 126 when a command cannot be
+executed.
+Pascal statements leave it alone.
+.Pp
+A failed command does not stop a script unless
+.Ev errexit
+is
+.Cm true .
+Then a command statement whose status is not 0 ends the script with
+that status, running the
+.Cm EXIT
+trap; at the prompt it abandons the rest of the line.
+Commands on the left of
+.Cm &&
+or
+.Cm \&|| ,
+including everything a procedure called there runs, and commands
+inside captures are exempt.
+Conditions are boolean expressions, not commands, so
+.Cm if
+and
+.Cm while
+need no exemption; test a command's status with
+.Cm \&||
+instead:
+.Bd -literal -offset indent
+errexit := true
+grep -q TODO notes || echo 'nothing to do'
+.Ed
+.Pp
+With
+.Ev pipefail
+set to
+.Cm true ,
+a pipeline's status is that of its last stage that failed, or 0 if
+none did.
+.Sh BUILTIN COMMANDS
+.Bl -tag -width "source fileXX" -offset indent
+.It Ic bg Op Ar job
+Continue a stopped
+.Ar job ,
+the current one by default, in the background.
+.It Ic cd Op Ar dir
+Change directory, to
+.Ev HOME
+by default.
+.Cm "cd -"
+goes to
+.Ev OLDPWD
+and prints the new directory.
+Each successful change sets
+.Ev OLDPWD
+to the previous
+.Ev PWD .
+A failure names the reason, as in
+.Dl concha: cd: /root: permission denied
+.It Ic disown Op Ar job
+Forget
+.Ar job ,
+the current one by default: it leaves the
+.Ic jobs
+list, and the shell no longer passes
+.Dv SIGHUP
+on to it, so it outlives the terminal.
+A stopped job is continued first.
+.Ic wait
+with no argument still waits for it, as it is still the shell's child.
+.It Ic echo Op Fl n Ar arg No ...
+Print the arguments separated by spaces.
+With
+.Fl n ,
+no final newline.
+.It Ic exec Op Ar command Op Ar arg ...
+Replace the shell with
+.Ar command ,
+an external program, after applying the redirections.
+If it cannot be run, the reason is printed,
+.Ev status
+is set to 127 (not found) or 126, and the shell carries on.
+With no
+.Ar command ,
+the redirections apply to the shell itself from then on:
+.Bd -literal -offset indent
+exec 3> log
+echo started >&3
+.Ed
+.It Ic fg Op Ar job
+Bring
+.Ar job ,
+the current one by default, to the foreground, continuing it if it
+was stopped, and wait for it.
+.Ev status
+is its status.
+Only an interactive shell has jobs to bring back.
+.It Ic jobs
+List the jobs: number, process id, whether running or stopped, and
+the command.
+The current job is marked
+.Sq + .
+.It Ic source Ar file
+Run
+.Ar file
+in the current shell.
+.Ic exit
+in it returns to the caller.
+A file that can't be read is an error naming the reason.
+Run by the
+.Ic prompt
+procedure, an error in
+.Ar file
+is shown and gives status 1, and the prompt carries on; anywhere else
+it is an error like any other.
+.It Ic trap Ar name signal No ...
+Run the procedure
+.Ar name
+when one of the
+.Ar signal Ns s
+arrives.
+Signals are named
+.Cm HUP , INT , QUIT , TERM , USR1
+and
+.Cm USR2 ;
+.Cm EXIT
+means the shell is about to exit.
+.Cm "trap - " Ns Ar signal No ...
+restores the default, and
+.Cm "trap '' " Ns Ar signal No ...
+ignores the signal.
+See
+.Sx SIGNALS .
+.It Ic ulimit Oo Fl c | f | n | s | t | v Oc Op Ar value | Cm unlimited
+Print or set a soft resource limit for the shell and the commands it
+starts:
+.Fl c
+core file size,
+.Fl f
+file size (the default),
+.Fl s
+stack size and
+.Fl v
+address space, all in kilobytes;
+.Fl n
+open files;
+.Fl t
+CPU seconds.
+.It Ic umask Op Ar mode
+Print the file creation mask as four octal digits, or set it to the
+octal
+.Ar mode .
+Symbolic modes are not supported.
+.It Ic unset Ar name No ...
+Remove each variable: a local of the current routine if there is one,
+else a global.
+An exported variable leaves the environment too.
+Naming a variable that does not exist is not an error.
+.It Ic wait Op Ar pid No ...
+Wait for all background jobs, or for each
+.Ar pid ,
+and set
+.Ev status
+to the status of the last one reaped: 0 if there was none, 127 for a
+.Ar pid
+that is not a child of the shell.
+.El
+.Sh BUILTIN ROUTINES
+.Bl -tag -width "exists(p), isdir(p), isfile(p)XX" -offset indent
+.It Fn write "e, ..."
+Print the values with no separators.
+.It Fn writeln "e, ..."
+The same, followed by a newline.
+A bare
+.Ic writeln
+prints only a newline.
+.It Fn readln v
+Read a line from standard input into the variable
+.Ar v .
+Returns false at end of input.
+.It Fn inc "v[, n]" , Fn dec "v[, n]"
+Add or subtract
+.Ar n
+(default 1).
+.It Fn halt "[n]"
+Exit the shell with status
+.Ar n
+(default: the current status).
+.It Fn length x
+Length of a string or list.
+.It Fn copy "x, i[, n]"
+Part of a string (from 1) or list (from 0).
+.It Fn pos "sub, s"
+Position of
+.Ar sub
+in
+.Ar s ,
+or 0.
+.It Fn int x , Fn str x
+Convert.
+.It Fn chr n , Fn ord s
+Character code conversions.
+.It Fn upcase s , Fn lowcase s
+Change ASCII case.
+.It Fn replace "s, old, new"
+.Ar s
+with every
+.Ar old
+replaced by
+.Ar new ,
+scanning left to right.
+An empty
+.Ar old
+is an error.
+.It Fn trim s
+Remove surrounding blanks.
+.It Fn split "s[, sep]"
+List of fields; with no separator, split on runs of blanks.
+.It Fn join "l[, sep]"
+One string, separated by a space by default.
+.It Fn lines s
+List of lines.
+.It Fn sort l
+A sorted copy of the list
+.Ar l .
+.It Fn glob pattern
+Sorted list of matches, possibly empty.
+.It Fn match "s, pattern"
+Glob-match a string.
+.It Fn exists p , Fn isdir p , Fn isfile p
+Test a path.
+.It Fn basename "p[, suffix]"
+The last component of the path
+.Ar p ,
+trailing slashes ignored, less
+.Ar suffix
+if it ends with it and is not all of it, as
+.Xr basename 1 :
+.Ql "basename('/doc/a.html', '.html')"
+is
+.Ql a .
+.It Fn dirname p
+All of
+.Ar p
+but its last component, as
+.Xr dirname 1 :
+.Ql /
+for a path at the root,
+.Ql \&.
+for one with no slash.
+.It Fn completions line
+The list of names
+.Ic Tab
+would offer at the end of
+.Ar line ,
+found as
+.Ic Tab
+finds them
+.Pq see Sx LINE EDITING ,
+but nothing is drawn or inserted:
+.Ql "completions('cd /us')"
+is
+.Ql "['/usr/']" .
+Names that only hold the word's letters in order come best first;
+any others are sorted.
+It shows what a
+.Ic complete
+function makes of a line.
+.It Fn defined name
+Whether a variable exists.
+.It Fn environ
+Sorted list of the names of the exported variables.
+.It Fn getenv name
+Value of the exported variable
+.Ar name ,
+as a string, or the empty string if there is none.
+.It Fn setenv "name, value"
+Set the global
+.Ar name
+to
+.Ar value ,
+as a string, and export it; a local of that name is left alone.
+A name that is empty or holds
+.Ql =
+is an error.
+.It Fn now
+Milliseconds since the epoch, for timing:
+.Ql "t := now(); make; writeln(now() - t, 'ms')" .
+.It Fn time "fmt[, ms]"
+The local time, or the instant
+.Ar ms
+from
+.Fn now ,
+formatted by
+.Ar fmt
+as by
+.Xr strftime 3 ,
+with these conversions:
+.Ql \&%Y
+and
+.Ql \&%y
+(year),
+.Ql \&%m ,
+.Ql \&%d
+and
+.Ql \&%e
+(month and day),
+.Ql \&%H ,
+.Ql \&%M
+and
+.Ql \&%S ,
+.Ql \&%a
+and
+.Ql \&%A
+(weekday),
+.Ql \&%b
+and
+.Ql \&%B
+(month name),
+.Ql \&%s
+(seconds since the epoch),
+.Ql \&%z
+and
+.Ql \&%Z
+(time zone),
+.Ql \&%F
+.Pq Ql \&%Y-%m-%d ,
+.Ql \&%T
+.Pq Ql \&%H:%M:%S ,
+.Ql \&%R
+.Pq Ql \&%H:%M
+and
+.Ql \&%% .
+Any other is an error.
+The zone is read once, at startup, from
+.Ev TZ
+(in its
+.Ql :name
+form) or
+.Pa /etc/localtime .
+.El
+.Pp
+.Fn getenv
+and
+.Fn setenv
+take the name as a string, so it may be worked out
+while the script runs:
+.Bd -literal -offset indent
+for n in environ() do
+  if match(n, 'LC_*') then unset $n
+.Ed
+.Sh LINE EDITING
+When standard input and standard error are terminals and
+.Ev TERM
+is set and not
+.Cm dumb ,
+input lines are edited in place.
+Lines wider than the terminal wrap.
+The prompt may be any width and may contain colour escapes.
+.Bl -tag -width "Alt-b, Alt-f, Ctrl-Left, Ctrl-RightXX" -offset indent
+.It Ic Left , Right , ^B , ^F
+Move one character.
+At the end of the line,
+.Ic Right
+and
+.Ic ^F
+accept the whole history suggestion.
+.It Ic Home , End , ^A , ^E
+Start or end of the line.
+At the end of the line,
+.Ic End
+and
+.Ic ^E
+accept the whole history suggestion.
+.It Ic Alt-b , Alt-f , Ctrl-Left , Ctrl-Right
+Move one word.
+At the end of the line,
+.Ic Alt-f
+and
+.Ic Ctrl-Right
+accept the history suggestion up to the end of its next word.
+.It Ic Backspace , ^H
+Delete the character before the cursor.
+.It Ic Delete , ^D
+Delete the character under the cursor.
+.Ic ^D
+on an empty line ends input.
+.It Ic ^W , Alt-Backspace
+Kill the word before the cursor.
+.It Ic Alt-d , Ctrl-Delete
+Kill the word after the cursor.
+.It Ic ^K
+Kill to the end of the line.
+.It Ic ^U
+Kill to the start of the line.
+.It Ic ^Y
+Insert the text last killed.
+Kills in a row add up, so
+.Ic ^W ^W ^Y
+puts back two words.
+Backspace, Delete and
+.Ic ^D
+delete without killing.
+.It Ic ^_ , ^X^U
+Undo the last change to the line; again, the one before.
+A run of typing is one change.
+.It Ic Alt-. , Alt-_
+Insert the last word of the previous history line; again, swap it
+for the last word of the line before that.
+Quotes keep a word together.
+.It Ic Alt-u , Alt-l , Alt-c
+Upper-case, lower-case or capitalise the word after the cursor, and
+move past it.
+Only ASCII letters change.
+.It Ic ^T
+Swap the two characters before the cursor.
+.It Ic Alt-t
+Swap the word before the cursor with the word after it, or at the end
+of the line, the last two words.
+.It Ic ^X^E
+Edit the line in
+.Ev VISUAL ,
+or
+.Ev EDITOR ,
+or
+.Xr vi 1 ,
+through a file in
+.Pa /tmp .
+The editor may be a procedure, and may take options after blanks, as
+in
+.Ql emacs -nw .
+What it leaves is echoed and run, and each of its lines goes into the
+history; if it leaves nothing, nothing runs.
+.It Ic ^L
+Clear the screen and redraw.
+.It Ic Up , Down , ^P , ^N
+Move through history.
+Unsubmitted text is kept when you return to the bottom of the history.
+.It Ic ^R
+Search history backwards as you type.
+.Ic ^R
+again finds an older match,
+.Ic Backspace
+shortens the query,
+.Ic ^G
+or
+.Ic ^C
+cancel,
+.Ic Enter
+runs the match, and any other key keeps the match and acts normally.
+.It Ic Tab
+Complete the word before the cursor.
+The first word of a command completes to a keyword, a builtin, a
+procedure or a program in
+.Ev PATH .
+In an expression \(em after
+.Cm := ,
+inside the parentheses of a call or of
+.Cm $( ,
+or after
+.Cm if , while , until , case , to , downto
+or
+.Cm in
+\(em a word completes to a keyword, a builtin routine, a procedure or
+a variable.
+.Cm $ Ns Ar name
+completes to a variable.
+An argument of a command first asks a
+.Ic complete
+function, if there is one (see
+.Sx Programmable completion
+below); otherwise, then the command's completion file, if it has one
+.Pq Xr concha-complete 5 ;
+otherwise an argument of
+.Ic cd
+completes to a directory.
+.Cm ~ Ns Ar user
+completes to a user's home,
+.Cm ~ Ns Ar user Ns Cm / .
+Anything else, a string in an expression included, completes to a
+file name, with a
+.Cm /
+after directories.
+Spaces and special characters are escaped with
+.Cm \e ,
+or quoted to match an open string.
+If no name starts with the word, names that hold its letters in order
+do, as in
+.Xr wuzzy 1 :
+.Ql dwn
+completes to
+.Ql Downloads/ ,
+and case is ignored unless the word has a capital.
+Those come best match first; other names are sorted.
+If several names match, their common prefix is inserted; if that adds
+nothing, they are shown in a menu below the line.
+Hidden files are offered only when the word starts with a dot.
+.It Ic Tab , Shift-Tab No in the menu
+Select the next or previous name, which stands in for the word.
+Once a name is selected, the arrows move around the menu,
+.Ic Enter
+takes it without running the line, and
+.Ic ^G
+or
+.Ic ^C
+puts back the word as typed.
+Any other key takes the selection and then acts as usual, so
+.Cm /
+goes on into a directory.
+A menu taller than the screen shows as many rows as fit, around the
+selection.
+.It Ic ^C
+Discard the line.
+.It Ic Enter
+Run the line.
+If the input is unfinished (an open
+.Cm begin ,
+string or heredoc), a
+.Cm ".\ "
+prompt asks for more.
+.El
+.Pp
+When the cursor is at the end of a line, the newest history line that
+starts with it is suggested: the rest of it is shown dim after the
+cursor, to be taken with the keys above or ignored.
+Continuation lines get no suggestion.
+After a command is not found and the error suggests another, the line
+just entered, with that word corrected, is the next line's suggestion,
+ahead of history and shown even before anything is typed; Right
+then Return runs it.
+.Pp
+History is kept in
+.Pa ~/.concha_history .
+Each line is appended when it is entered.
+Blank lines and repeats of the previous line are not recorded.
+The newest 1000 lines are loaded at startup, and the file is trimmed
+when it grows much longer than that.
+.Ss Programmable completion
+A function named
+.Ic complete
+completes the arguments of commands.
+Its one argument is a list of the command's words up to the cursor,
+unquoted, with redirections left out: the first is the command's name
+and the last is the word being completed, perhaps empty.
+It returns the words that word might become, as a list or as a string
+of lines; those that start with the word are offered.
+When it returns nothing, the command's completion file is read, and
+without one the usual rules apply.
+.Bd -literal -offset indent
+function complete(words);
+begin
+  result := [];
+  case words[0] of
+    'git':
+      if length(words) = 2 then
+        result := ['add', 'checkout', 'commit', 'diff', 'log', 'status']
+      else if words[1] = 'checkout' then
+        result := `git branch --format='%(refname:short)'`;
+    'make':
+      result := `grep -o '^[a-z][^:$=]*:' Makefile 2>/dev/null | tr -d :`
+  end
+end;
+.Ed
+.Pp
+It runs inside the shell with standard input, output and error on
+.Pa /dev/null ,
+so nothing it prints reaches the screen, and
+.Va status
+is kept.
+An error in it counts as returning nothing.
+The keyboard is not watched while it runs, so it should be quick.
+A completion file, named after the program and kept in
+.Pa ~/.local/share/concha/complete
+or beside the programs installed, describes the program's
+subcommands, options and operands, which are then completed without
+running anything; its format is in
+.Xr concha-complete 5 .
+Keep to
+.Ic complete
+what has to be worked out when
+.Ic Tab
+is pressed, such as git branches.
+.Pp
+To see what it makes of a line, call
+.Fn completions
+with that line:
+.Ql "writeln(completions('git checkout '))" .
+.Ss Colour
+Colour is on when standard error is a terminal,
+.Ev TERM
+is set and not
+.Cm dumb ,
+and
+.Ev NO_COLOR
+is unset or empty.
+It uses only the eight basic colours, bold and dim, so the terminal's
+own palette applies; there is nothing to configure.
+With colour on, errors start with a bold red
+.Sq concha: ,
+the colour names in
+.Sx VARIABLES AND ENVIRONMENT
+hold escape sequences, and the line is highlighted as you type:
+.Bl -tag -width "single-quoted stringsXX" -offset indent -compact
+.It comments
+dim
+.It single-quoted strings
+green
+.It double-quoted strings
+yellow
+.It Cm $ Ns Ar name , Cm $( Ns Ar ... Ns Cm \&) , Cm ${ Ns Ar ... Ns Cm }
+cyan
+.It keywords
+bold, where a statement or expression is expected
+.It backticks
+magenta
+.It the command word
+blue if it names a builtin, a procedure or a program that can run,
+red if not
+.El
+.Pp
+In completion lists, directories are blue and executable files green.
+.Pp
+The highlighter sees only the line being edited, so a continuation
+line of a string or comment is coloured as if it stood alone.
+.Sh JOB CONTROL
+In an interactive shell each external command or pipeline is a job: a
+process group of its own, which holds the terminal while it runs in
+the foreground.
+Ctrl-Z stops the job in the foreground; the shell reports
+.Dl [1] stopped vi notes
+and goes back to the prompt with
+.Ev status
+148, abandoning any loop it was in, as Ctrl-C does.
+A background job that reads from the terminal stops too, and is
+reported at the next prompt, together with the jobs that have
+finished.
+.Pp
+Jobs are numbered from 1, reusing numbers that have come free.
+The current job is the one most recently stopped or started in the
+background.
+.Ic fg
+and
+.Ic bg
+take a job's number, with or without a leading
+.Sq % ,
+and default to the current job:
+.Bd -literal -offset indent
+vi notes
+^Z
+[1] stopped vi notes
+make > log &
+[2] 4242 make
+jobs
+[1]  4239 stopped vi notes
+[2]+ 4242 running make
+fg 1
+.Ed
+.Pp
+A job that stops keeps its terminal settings, which
+.Ic fg
+gives back; otherwise the terminal is left as the last command that
+exited set it, or reset if the command was killed.
+.Ic kill
+is an external program and takes process ids, which
+.Ic jobs
+lists; a negative one names a whole job, as in
+.Cm "kill -- -4242" .
+Leaving the shell while jobs are stopped takes a second
+.Ic exit
+or Ctrl-D in a row; the first only says
+.Dl concha: there are stopped jobs
+The system then sends them
+.Dv SIGHUP .
+When the shell itself gets
+.Dv SIGHUP ,
+as when its terminal window closes, it passes the signal on to every
+job, running or stopped, then dies of it;
+.Ic disown
+takes a job out of its reach.
+Jobs left running by a plain
+.Ic exit
+carry on.
+.Pp
+Scripts have no job control: see
+.Sx SIGNALS .
+.Sh SIGNALS
+The interactive shell ignores
+.Dv SIGQUIT ,
+.Dv SIGTSTP ,
+.Dv SIGTTIN
+and
+.Dv SIGTTOU .
+Any shell, a script too, passes
+.Dv SIGHUP
+on to its background jobs before dying of it
+.Pq Sx JOB CONTROL .
+.Dv SIGINT
+stops the running command and any loop inside the shell, then returns
+to the prompt, or ends a script with status 130.
+If the command in the foreground catches the signal and survives it, as
+an interpreter or a pager does, the shell carries on instead; for a
+pipeline, its last command decides.
+Commands start with default signal handling.
+In a script, background jobs ignore
+.Dv SIGINT ,
+and a command that stops is continued, since nothing could resume it.
+.Pp
+.Ic trap
+changes this.
+A trapped signal is noted when it arrives, and its procedure runs
+before the next statement; while a command runs in the foreground,
+that is once it has finished.
+The procedure leaves
+.Ev status
+as it found it.
+A trapped
+.Dv SIGINT
+no longer stops loops.
+The
+.Cm EXIT
+procedure runs once, when a script ends, on
+.Ic halt ,
+after an error, and when the interactive shell exits; not when a
+signal kills the shell.
+Child processes, including captures and pipeline stages, do not run
+the shell's trap procedures, but signals ignored with
+.Cm "trap ''"
+stay ignored in them.
+.Bd -literal -offset indent
+procedure cleanup; begin rm -f $tmp end;
+trap cleanup EXIT
+.Ed
+.Sh QUERIES
+.Nm
+.Fl q Ar kind Ar script
+(for
+.Cm words
+and
+.Cm def ,
+.Ar script : Ns Ar line : Ns Ar column )
+prints its answer on standard output, one item to a line, fields
+separated by a tab, lines and columns counted from 1, columns in
+bytes.
+The kinds are:
+.Bl -tag -width outline
+.It Cm check
+The first syntax error, as
+.Ar line ,
+.Ar column
+and
+.Ar message ,
+or nothing if the script parses.
+.It Cm outline
+Each
+.Ic procedure
+and
+.Ic function ,
+nested or not, and each name declared with
+.Ic var
+or
+.Ic export
+outside them, in the order they appear:
+.Bd -literal -offset indent
+kind	name	line	column	last
+.Ed
+.Pp
+.Ar kind
+is
+.Ql proc ,
+.Ql func
+or
+.Ql var ;
+.Ar line
+and
+.Ar column
+are where the name is, and
+.Ar last
+is the line of a routine's closing
+.Ic end ,
+a variable's own line.
+If the script has a syntax error, the outline is of what was parsed
+before it, and a routine still open there ends on the error's line.
+.It Cm words
+What can be typed at
+.Ar line
+and
+.Ar column
+of the script:
+.Bd -literal -offset indent
+kind	word	detail
+.Ed
+.Pp
+.Ar kind
+is
+.Ql keyword ,
+.Ql builtin
+(a builtin command or routine),
+.Ql proc ,
+.Ql func
+or
+.Ql var .
+.Ar detail
+is how a builtin is used, as in
+.Sx BUILTIN COMMANDS
+and
+.Sx BUILTIN ROUTINES ,
+and a routine's signature, as
+.Ql name(a, b) ;
+it is empty for the rest.
+The routines are all those of the script.
+The variables are the globals declared before that place, the
+locals and parameters of the routines it is inside, and, in a
+routine, the locals declared before it.
+If the script has a syntax error, the words are those of what was
+parsed before it, plus the names of the routines on the lines after
+it, found by their keyword at the start of a line, with no parameters.
+.It Cm def
+Where the routine named at
+.Ar line
+and
+.Ar column
+of the script is declared:
+.Bd -literal -offset indent
+line	column	name
+.Ed
+.Pp
+The place may be on a call of a procedure or function of the script,
+a command word or a call in an expression, or on its declaration,
+which answers itself.
+A routine is found wherever it stands in the script, before the
+call or after it; when routines of one name are nested, the
+innermost declaration visible from the call is the one.
+A builtin, an external command, a variable and anything else give
+nothing.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width NO_COLOR -offset indent
+.It Ev EDITOR
+The editor for
+.Ic ^X^E
+when
+.Ev VISUAL
+is unset or empty; see
+.Sx LINE EDITING .
+.It Ev HOME
+The directory for
+.Cm ~ ,
+.Ic cd
+with no argument,
+.Pa ~/.concharc
+and
+.Pa ~/.concha_history .
+.It Ev NO_COLOR
+If set and not empty, no colour is used; see
+.Sx Colour .
+.It Ev PATH
+Where commands are looked for.
+If it is unset or empty,
+.Pa /usr/local/bin:/usr/bin:/bin
+is searched.
+.It Ev TZ
+The time zone for
+.Fn time ,
+as
+.Ql :Europe/London ;
+read at startup.
+.It Ev TERM
+A value of
+.Cm dumb ,
+or none, turns off line editing and colour.
+.It Ev VISUAL
+The editor for
+.Ic ^X^E ;
+see
+.Sx LINE EDITING .
+.It Ev XDG_DATA_HOME , XDG_DATA_DIRS
+Where completion files are looked for, under
+.Pa concha/complete ;
+see
+.Xr concha-complete 5 .
+.El
+.Sh FILES
+.Bl -tag -width "~/.concha_historyX" -offset indent
+.It Pa ~/.concharc
+Sourced by the interactive shell before the first prompt.
+The
+.Pa concharc
+among the examples
+.Pq see Xr concha-tutorial 7
+is a commented one to start from.
+.It Pa ~/.concha_history
+Line-editing history.
+.It Pa ~/.local/share/concha/complete/
+Completion files, one per program
+.Pq Xr concha-complete 5 ;
+also
+.Pa concha/complete
+under
+.Ev XDG_DATA_HOME
+and each directory of
+.Ev XDG_DATA_DIRS .
+.It Pa /usr/local/share/concha/examples
+Example scripts and a commented
+.Pa concharc ,
+listed in
+.Xr concha-tutorial 7 .
+The directory follows the prefix concha was installed with.
+.El
+.Sh EXIT STATUS
+The final
+.Ev status ,
+or the argument of
+.Ic halt
+or
+.Ic exit ;
+2 after a syntax or runtime error in a script;
+with
+.Fl n ,
+0 if the script parses and 2 if it does not;
+with
+.Fl q ,
+0 when it answered, even when the script has an error, and 2 for a
+bad query: an unknown kind, a missing
+.Ar script
+or one that cannot be read;
+130 after an interrupt;
+127 if the script cannot be read.
+.Sh DIAGNOSTICS
+Errors go to standard error, after the file and line of the statement
+that failed:
+.Dl concha: lib.cn:12: undefined variable nosuch
+The file is the one the statement was read from: the script, a file
+run with
+.Ic source ,
+or
+.Pa .concharc ,
+wherever the procedure holding it was called from.
+A script given with
+.Fl c
+or read from standard input shows the line alone, and a line typed at
+the prompt neither.
+With
+.Fl n ,
+a syntax error's line is followed by its column,
+.Ql file:line:col: ,
+as compilers and editors expect.
+With
+.Fl q ,
+an error found in the script is the answer, on standard output;
+only a bad query goes to standard error.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+// count lines of Pascal
+var total := 0
+for f in glob('*.pas') do
+  total := total + int(`wc -l < $f`)
+writeln(total, ' lines')
+
+// arguments
+case length(args) of
+  0: begin echo 'usage: deploy host' >&2; halt(2) end
+else
+  host := args[0]
+end
+
+// a pipeline feeding the shell
+var big := []
+du -s * | while readln(l) do
+  if int(split(l)[0]) > 1000 then big := big + [split(l)[1]]
+.Ed
+.Pp
+The last loop runs in a child process because it is a stage of a
+pipeline, so
+.Ev big
+is left unchanged.
+Give the loop its input with a redirection instead to keep the
+result:
+.Bd -literal -offset indent
+begin
+  while readln(l) do big := big + [l]
+end < list.txt
+.Ed
+.Sh DIFFERENCES FROM SH
+No word splitting, no
+.Ev IFS ,
+no
+.Ic [
+or
+.Ic test ,
+no arithmetic expansion (use
+.Cm $( Ns Ar expr Ns Cm \&) ),
+no brace expansion, no
+.Ic eval ,
+no
+.Cm >( Ns Ar list Ns Cm \&) ,
+and no subshell parentheses.
+.Cm ~ Ns Ar user
+is looked up in
+.Pa /etc/passwd
+only, not through
+.Xr getpwnam 3 ,
+so users from LDAP and the like are not known.
+Undefined variables are errors.
+A glob that matches nothing is an error.
+There are no assignments before a command:
+.Cm "FOO=bar cmd"
+is the command
+.Cm FOO=bar ,
+and when it isn't found the error suggests
+.Cm "env FOO=bar cmd"
+instead.
+.Sh BUGS
+Characters are assumed to be one column wide when editing.
+Completion guesses what a word is from the line up to the cursor, and
+the guess can be wrong.
+.Pp
+A redirection after a loop's body belongs to the body, not the loop:
+.Cm "while readln(l) do cat <<< "
+feeds each
+.Ic cat
+its line, while the loop itself reads standard input.
+When the body is a Pascal call, as in
+.Cm "while readln(l) do writeln(l) < f" ,
+that is almost certainly a mistake, and it is a syntax error; wrap the
+loop in
+.Cm begin ... end
+and redirect that.
+With a command as the body it cannot be told from intent, so it is
+allowed.
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr wuzzy 1 ,
+.Xr concha-lsp 1 ,
+.Xr concha-complete 5 ,
+.Xr concha-tutorial 7 ,
+the Revised Report on Pascal, and
+.Pa doc/internals.md
+in the source tree.
+.Sh AUTHORS
+.An Luis Diaz Aq Mt luis@lucela.org .
+.Nm
+is distributed under the ISC license.

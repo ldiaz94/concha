@@ -1,0 +1,38 @@
+#!/usr/bin/env concha
+{ count.cn -- count the lines, words and characters of files, like wc.
+
+  Run:    concha count.cn /etc/passwd /etc/hostname
+  Shows:  procedures, locals, readln in a begin ... end < file block,
+          split, inc, and globals updated from a procedure.
+
+  Characters are bytes, and every line is counted with its newline. }
+
+if length(args) = 0 then begin
+  echo 'usage: count.cn file...' >&2
+  halt(2)
+end;
+
+tl := 0; tw := 0; tc := 0;           { totals, global }
+
+procedure count(f);
+var line, l, w, c;                   { locals: gone when count returns }
+begin
+  l := 0; w := 0; c := 0;
+  { The redirection applies to the whole block, so every readln reads
+    the file.  The block runs inside the shell: l, w and c survive it. }
+  begin
+    while readln(line) do begin
+      inc(l);
+      inc(w, length(split(line)));   { split with no separator: on blanks }
+      inc(c, length(line) + 1)
+    end
+  end < $f;
+  writeln(l, #9, w, #9, c, #9, f);
+  inc(tl, l); inc(tw, w); inc(tc, c); { these are globals, so they change }
+end;
+
+for f in args do
+  if isfile(f) then count(f)
+  else writeln('count.cn: ', f, ': not a file');
+
+if length(args) > 1 then writeln(tl, #9, tw, #9, tc, #9'total')

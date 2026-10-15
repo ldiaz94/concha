@@ -1,0 +1,36 @@
+#!/usr/bin/env concha
+{ bigfiles.cn -- the largest files under a directory.
+
+  Run:    concha bigfiles.cn [dir] [n]      (defaults: . and 10)
+  Shows:  a capture of find, lines, sort on strings, copy, a function,
+          and $(expr) inside command words. }
+
+dir := '.'; n := 10;
+if length(args) > 0 then dir := args[0];
+if length(args) > 1 then n := int(args[1]);
+if not isdir(dir) then begin
+  writeln('bigfiles.cn: ', dir, ': not a directory') >&2;
+  halt(1)
+end;
+
+{ bytes as a short human-readable size }
+function human(b);
+begin
+  if b >= 1073741824 then result := str(b div 1073741824) + 'G'
+  else if b >= 1048576 then result := str(b div 1048576) + 'M'
+  else if b >= 1024 then result := str(b div 1024) + 'K'
+  else result := str(b)
+end;
+
+{ find prints each size padded with zeros to 15 digits, then the path.
+  Padded numbers sort as strings in numeric order, so the builtin sort
+  puts the largest last.  Errors (unreadable directories) are dropped. }
+found := sort(lines(`find $dir -type f -printf '%015s %p\n' 2> /dev/null`));
+
+if length(found) < n then n := length(found);
+for i := length(found) - 1 downto length(found) - n do begin
+  l := found[i];
+  size := int(copy(l, 1, 15));         { int reads past the zeros }
+  path := copy(l, 17, length(l));      { the rest, spaces and all }
+  echo $(human(size)) $path
+end

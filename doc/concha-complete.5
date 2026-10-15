@@ -1,0 +1,287 @@
+.Dd October 5, 2026
+.Dt CONCHA-COMPLETE 5
+.Os
+.Sh NAME
+.Nm concha-complete
+.Nd how a program tells concha to complete its command line
+.Sh SYNOPSIS
+.Pa $XDG_DATA_HOME/concha/complete/ Ns Ar program
+.br
+.Pa $XDG_DATA_DIRS/concha/complete/ Ns Ar program
+.Sh DESCRIPTION
+A completion file describes the subcommands, options and operands of
+one program, so that
+.Xr concha 1
+can complete its arguments with
+.Ic Tab
+without ever running it.
+Nothing in the file can run anything: completion starts no process,
+reaches no network and waits on nothing.
+Anything that must be computed when
+.Ic Tab
+is pressed, such as git branches, belongs in a
+.Ic complete
+function instead, as
+.Sx Programmable completion
+in
+.Xr concha 1
+describes.
+.Pp
+Programs that use
+.Xr getopt 3
+write their file at
+.Ql make install ;
+anyone may write one by hand.
+.Ss Where concha looks
+For an argument of a command, once the user's
+.Ic complete
+function has returned nothing,
+.Nm concha
+looks for a file named after the last path component of the command
+word: first in
+.Pa $XDG_DATA_HOME/concha/complete
+.Po
+.Pa ~/.local/share/concha/complete
+when
+.Ev XDG_DATA_HOME
+is unset or empty
+.Pc ,
+then in
+.Pa concha/complete
+under each directory of
+.Ev XDG_DATA_DIRS
+.Po
+.Pa /usr/local/share:/usr/share
+when it is unset or empty
+.Pc .
+Directories that are not absolute are passed over.
+The first file it can read is used: a regular file of at most 64 KB
+whose first line is
+.Ql complete 1 .
+If there is none, the usual rules apply.
+The file is read again on every
+.Ic Tab ,
+so a change takes effect at once.
+.Ss Lines
+The first line is
+.Ql complete 1 ,
+the version of the format.
+Each line after it is a keyword and its fields, separated by blanks
+(spaces and tabs).
+A
+.Ql #
+at the start of a field begins a comment, which runs to the end of the
+line; blank lines are ignored.
+A
+.Ql \e
+makes the next character part of the field, so a field may hold a
+blank or start with a
+.Ql # ;
+that is the only quoting.
+.Pp
+The second field of every line is its
+.Em scope ,
+which says where on the command line it applies:
+.Bl -tag -width "remote.addXX" -offset indent
+.It Cm -
+the command itself, before any subcommand;
+.It Cm start
+after the subcommand
+.Cm start ;
+.It Cm remote.add
+after
+.Cm remote add .
+.El
+.Ss Keywords
+.Bl -tag -width Ds
+.It Cm sub Ar scope name ...
+The subcommands of
+.Ar scope .
+.It Cm opt Ar scope short long Op Ar kind ...
+An option.
+.Ar short
+is its letter and
+.Ar long
+its name without the dashes; either may be
+.Ql -
+for none.
+With no
+.Ar kind
+it is a flag; with one it takes a value of that kind.
+.It Cm arg Ar scope n kind ...
+The kind of the
+.Ar n Ns th
+operand of
+.Ar scope ,
+counting from 1.
+Options and their values are not counted, and neither is the
+subcommand word itself.
+An operand with no
+.Cm arg
+line is a
+.Cm file .
+.El
+.Ss Kinds
+.Bl -tag -width Ds
+.It Cm file
+File names, as
+.Nm concha
+completes them anyway.
+.It Cm dir
+Directories only.
+.It Cm word
+Free text: nothing is offered, and there is no falling back to file
+names.
+.It Cm one Ar word ...
+One of these words.
+.It Cm in Ar path
+The names in the directory
+.Ar path .
+Names starting with a dot are offered only when the word does, and a
+missing directory offers nothing.
+Only here are
+.Ql ~ ,
+.Ql $ Ns Ar NAME
+and
+.Ql ${ Ns Ar NAME Ns }
+expanded, from the environment; if one of them is unset or empty,
+nothing is offered.
+There are no expressions and no backticks.
+.It Cm command
+This operand and everything after it are a command line of their own,
+completed as if typed at the prompt: the program's name first, then
+that program's arguments, by its own completion file, the user's
+.Ic complete
+function, or file names.
+.El
+.Ss How the line is read
+.Nm concha
+reads the words from the second up to the one before the cursor.
+A word that names a
+.Cm sub
+of the current scope, before any operand in it, enters that
+subcommand's scope.
+A word starting with
+.Ql -
+is an option, until
+.Ql --
+ends the options; a lone
+.Ql -
+is an operand.
+A group of short flags such as
+.Ql -lw
+is read letter by letter, and its last letter may take the next word as
+its value; a letter that takes a value before the last has the rest of
+the word as its value.
+.Ql --name=value
+is whole in itself.
+Every other word is an operand.
+.Pp
+The word under the cursor then completes to:
+.Bl -bullet -offset indent
+.It
+the kind of the option before it, when that option is waiting for its
+value;
+.It
+the kind of the option
+.Ar name ,
+for the part after
+.Ql --name= ;
+.It
+the scope's options, long as
+.Ql --name
+and short as
+.Ql -x ,
+for a word starting with
+.Ql -
+before any
+.Ql -- ;
+.It
+otherwise, the scope's subcommands, if no operand has come yet,
+together with the next operand's kind.
+.El
+.Pp
+As always, a name that starts with the word is offered, and if none
+does, names holding its letters in order are.
+.Ss How the format grows
+A line with a keyword
+.Nm concha
+does not know is skipped, so new keywords do not break an older
+.Nm concha .
+An unknown kind is read as
+.Cm file .
+Extra fields at the end of a line are ignored, so a keyword may gain
+fields.
+A line that is malformed (too few fields, an option letter longer than
+one character, a long name starting with a dash, an operand number that
+is not one) is skipped, silently: completion never prints.
+The version changes only for a change that would make an older
+.Nm concha
+misread a file; a file with a version this
+.Nm concha
+does not know is passed over, and the search goes on.
+.Sh FILES
+.Bl -tag -width Ds -compact
+.It Pa ~/.local/share/concha/complete/
+The user's files, when
+.Ev XDG_DATA_HOME
+is unset.
+.It Pa /usr/local/share/concha/complete/
+.It Pa /usr/share/concha/complete/
+Files installed with programs, when
+.Ev XDG_DATA_DIRS
+is unset.
+.El
+.Sh EXAMPLES
+The file for a program that runs commands in the background,
+.Pa ~/.local/share/concha/complete/tlo :
+.Bd -literal -offset indent
+complete 1
+# tlo(1)
+sub  -      start stop log ls bar rm
+opt  -      h help
+opt  start  b bar     word
+arg  start  1         word
+arg  start  2         command
+opt  log    f follow
+arg  log    1         in $XDG_RUNTIME_DIR/tlo
+arg  stop   1         in $XDG_RUNTIME_DIR/tlo
+.Ed
+.Pp
+With it,
+.Ql "tlo s"
+completes to
+.Ql start
+and
+.Ql stop ;
+.Ql "tlo start -"
+to
+.Ql --bar
+and
+.Ql -b ;
+.Ql "tlo start web ech"
+to
+.Ql echo ,
+after which
+.Ic echo Ns 's
+arguments complete as they would at the prompt; and
+.Ql "tlo log "
+to the names in
+.Pa $XDG_RUNTIME_DIR/tlo .
+.Pp
+To see what a file makes of a line, ask
+.Nm concha
+for the names
+.Ic Tab
+would offer:
+.Bd -literal -offset indent
+writeln(completions('tlo log -f '))
+.Ed
+.Sh SEE ALSO
+.Xr concha 1 ,
+.Xr getopt 3 ,
+.Xr concha-tutorial 7
+.Sh AUTHORS
+.An Luis Diaz Aq Mt luis@lucela.org .
+.Nm concha
+is distributed under the ISC license.

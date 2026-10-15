@@ -1,0 +1,40 @@
+#!/usr/bin/env concha
+{ template.cn -- fill in a letter from variables, using heredocs.
+
+  Run:    concha template.cn [name]
+  Shows:  heredocs with $name and $(expr) filled in, the indented
+          terminator, a quoted tag for literal text, captures, join,
+          and a here-string. }
+
+name := 'reader';
+if length(args) > 0 then name := join(args);
+today := `date +%Y-%m-%d`;                   { a capture gives a string }
+topics := ['pipes', 'procedures', 'heredocs'];
+
+{ The terminator EOF is indented; that much indentation is removed
+  from every line, so the text can follow the code's layout. }
+procedure letter;
+begin
+  cat <<EOF
+    $today
+
+    Dear $name,
+
+    This letter was filled in by concha.  It covers
+    $(length(topics)) topics: $(join(topics, ', ')).
+      (This line keeps its two extra spaces.)
+
+    Yours,
+    $(upcase('template.cn'))
+    EOF
+end;
+
+letter
+
+{ With the tag quoted, nothing is filled in. }
+cat <<'EOF'
+  Written as: Dear $name, ... $(length(topics)) topics
+  EOF
+
+{ A here-string feeds one string to a command. }
+tr a-z A-Z <<< "goodbye, $name"

@@ -1,0 +1,19 @@
+#!/usr/bin/env concha
+{ hello.cn -- greet everyone named on the command line.
+
+  Run:    concha hello.cn Ada Niklaus
+  Shows:  args, length, writeln, and a usage message with halt. }
+
+{ No names?  Say how to call us, on standard error, and fail with 2,
+  the usual status for a usage error. }
+if length(args) = 0 then begin
+  echo 'usage: hello.cn name...' >&2
+  halt(2)
+end;
+
+{ args is a list; for ... in walks it.  writeln takes any number of
+  values and prints them with no separators. }
+for name in args do
+  writeln('Hello, ', name, '!');
+
+writeln(length(args), ' greeted.')

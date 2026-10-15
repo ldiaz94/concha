@@ -1,0 +1,43 @@
+#!/usr/bin/env concha
+{ backup.cn -- a dated tar archive of files and directories.
+
+  Run:    concha backup.cn dest-dir path...
+  Shows:  errexit to stop at the first failed command, trap EXIT to
+          clean up however the script ends, && and ||, and copy on a
+          list.
+
+  The archive is written as name.part and renamed only once tar has
+  succeeded, so dest-dir never holds a half-written backup. }
+
+if length(args) < 2 then begin
+  echo 'usage: backup.cn dest-dir path...' >&2
+  halt(2)
+end;
+dest := args[0];
+paths := copy(args, 1);                 { all but the first }
+
+test -d $dest || mkdir -p $dest         // make dest-dir if it is missing
+
+stamp := time('%Y%m%d-%H%M%S');
+out := dest + '/backup-' + stamp + '.tar.gz';
+part := out + '.part';
+
+{ Runs when the script ends: normally, by halt, by an error, or when
+  errexit stops it.  Only an unfinished archive is left to remove. }
+procedure cleanup;
+begin
+  if exists(part) then begin
+    rm -f $part
+    writeln('backup.cn: removed the unfinished ', part)
+  end
+end;
+trap cleanup EXIT
+
+{ From here on, a failing command ends the script with its status.
+  Commands left of && or || are exempt: their failure is expected. }
+errexit := true;
+
+tar czf $part -- $paths                  // $paths: one argument per item
+mv $part $out
+
+tar tzf $out > /dev/null && writeln('wrote ', out) || writeln('cannot read back ', out)

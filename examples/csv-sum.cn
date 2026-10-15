@@ -1,0 +1,48 @@
+#!/usr/bin/env concha
+{ csv-sum.cn -- add up one column of a CSV file with a header line.
+
+  Run:    concha csv-sum.cn file column
+          column is a header name, or a number counting from 1.
+  Try:    printf 'item,price\ntea,3\njam,4\n' > /tmp/shop.csv
+          concha csv-sum.cn /tmp/shop.csv price
+  Shows:  split with a separator, int, case to tell a number from a
+          name, and halt with an error message.  Quoted fields holding
+          commas are beyond it. }
+
+if length(args) <> 2 then begin
+  echo 'usage: csv-sum.cn file column' >&2
+  halt(2)
+end;
+file := args[0]; col := args[1];
+
+procedure die(msg);
+begin
+  writeln('csv-sum.cn: ', msg) >&2;
+  halt(1)
+end;
+
+if not isfile(file) then die(file + ': not a file');
+
+sum := 0; rows := 0;
+begin
+  if not readln(header) then die(file + ': empty');
+  names := split(header, ',');
+  { Which column?  A leading digit means a number, anything else a name. }
+  case col[1] of
+    '0'..'9': k := int(col) - 1
+  else
+    k := -1;
+    for i := 0 to length(names) - 1 do
+      if trim(names[i]) = col then k := i
+  end;
+  if (k < 0) or (k >= length(names)) then die('no column ' + col);
+  while readln(line) do begin
+    f := split(line, ',');
+    if (k < length(f)) and (trim(f[k]) <> '') then begin
+      sum := sum + int(trim(f[k]));        { int fails on a non-number }
+      inc(rows)
+    end
+  end
+end < $file;
+
+writeln(trim(names[k]), ': ', sum, ' over ', rows, ' rows')

@@ -1,0 +1,36 @@
+#!/usr/bin/env concha
+{ parallel.cn -- checksum files in parallel, one background job each.
+
+  Run:    concha parallel.cn file...
+  Shows:  & for background jobs, lastpid, wait on a pid to get its
+          status, lists that grow, and a temporary directory in /tmp. }
+
+if length(args) = 0 then begin
+  echo 'usage: parallel.cn file...' >&2
+  halt(2)
+end;
+
+tmp := `mktemp -d /tmp/parallel.XXXXXX`;
+
+{ Start every job at once.  lastpid is the process id of the job just
+  started; keep them in order, with the file each writes to. }
+pids := [];
+for i := 0 to length(args) - 1 do begin
+  sha256sum -- $(args[i]) > $(tmp + '/' + str(i)) 2>&1 &
+  pids := pids + lastpid
+end;
+writeln(length(pids), ' jobs started');
+
+{ wait pid waits for that job and sets status to how it ended. }
+failed := 0;
+for i := 0 to length(pids) - 1 do begin
+  wait $(pids[i])
+  if status = 0 then cut -c 1-16,65- $(tmp + '/' + str(i))
+  else begin
+    writeln('failed: ', args[i], ' (status ', status, ')');
+    inc(failed)
+  end
+end;
+
+rm -r $tmp
+if failed > 0 then halt(1)

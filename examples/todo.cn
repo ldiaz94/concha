@@ -1,0 +1,65 @@
+#!/usr/bin/env concha
+{ todo.cn -- a tiny to-do list, kept in ~/.todo, one item per line.
+
+  Run:    concha todo.cn add buy milk
+          concha todo.cn list         (or no argument at all)
+          concha todo.cn done 1
+          Set TODOFILE to keep the list somewhere else.
+  Shows:  case on a command word, procedures called command-style,
+          exists, defined, >> to append, and a block redirected to
+          rewrite a file. }
+
+file := HOME + '/.todo';
+if defined('TODOFILE') then file := TODOFILE;
+
+procedure usage;
+begin
+  echo 'usage: todo.cn [list | add text... | done n]' >&2;
+  halt(2)
+end;
+
+procedure add;
+begin
+  if length(args) = 0 then usage;
+  echo $args >> $file                   // every word, one line
+end;
+
+procedure list;
+var n, line;
+begin
+  if not exists(file) then begin writeln('nothing to do'); exit end;
+  n := 0;
+  begin
+    while readln(line) do begin inc(n); writeln(n, '. ', line) end
+  end < $file
+end;
+
+procedure done(n);
+var items, i;
+begin
+  if exists(file) then items := lines(`cat $file`) else items := [];
+  n := int(n);
+  if (n < 1) or (n > length(items)) then begin
+    writeln('todo.cn: no item ', n) >&2;
+    halt(1)
+  end;
+  { write back every item but the one done }
+  begin
+    for i := 0 to length(items) - 1 do
+      if i <> n - 1 then writeln(items[i])
+  end > $file;
+  writeln('done: ', items[n - 1])
+end;
+
+{ The first argument picks the action; the rest are passed on.  $rest
+  holds a list, so each item becomes one argument. }
+cmd := '';
+if length(args) > 0 then cmd := args[0];
+rest := copy(args, 1);
+case cmd of
+  '', 'list': list;
+  'add': add $rest;
+  'done': if length(rest) = 1 then done $rest else usage
+else
+  usage
+end

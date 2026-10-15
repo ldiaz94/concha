@@ -1,0 +1,387 @@
+.Dd September 25, 2026
+.Dt CONCHA-TUTORIAL 7
+.Os
+.Sh NAME
+.Nm concha-tutorial
+.Nd a tour of concha for people who already use a Unix shell
+.Sh DESCRIPTION
+This tour assumes you already use a Unix shell.
+The complete reference is
+.Xr concha 1 .
+.Sh 1. COMMANDS WORK AS BEFORE
+.Bd -literal -offset indent
+% ls -l /etc | grep conf | wc -l
+% make 2> errors.txt && ./prog || echo failed
+% sleep 10 &
+% cat < in.txt > out.txt
+.Ed
+.Pp
+Pipes, redirections,
+.Cm && , ||
+and
+.Cm &
+mean what they mean in
+.Xr sh 1 .
+Quote with single quotes, Pascal style:
+.Cm 'it''s' .
+Double quotes interpolate:
+.Cm "\(dqhello $USER\(dq" .
+.Sh 2. ANYTHING MORE IS PASCAL
+A line that starts with a keyword,
+.Cm "name :="
+or
+.Cm "name("
+is Pascal:
+.Bd -literal -offset indent
+% n := 3
+% writeln('n squared is ', n * n)
+n squared is 9
+% for i := 1 to n do echo step $i
+step 1
+step 2
+step 3
+.Ed
+.Pp
+Semicolons between statements are optional, and a newline ends a
+command.
+Blocks look like Pascal:
+.Bd -literal -offset indent
+if exists('build') then begin
+  echo cleaning
+  rm -r build
+end else
+  echo nothing to clean
+.Ed
+.Pp
+.Cm else , end
+and
+.Cm until
+end a command when they close an open
+.Cm if , begin , case
+or
+.Cm repeat ,
+so a command can be the body of an
+.Cm if .
+Anywhere else they are plain words.
+Inside a block, write
+.Cm "echo 'end'"
+to print the word itself.
+.Sh 3. VALUES STAY WHOLE
+In
+.Xr sh 1 ,
+.Cm $x
+is re-split on blanks and then globbed.
+In
+.Nm concha ,
+.Cm $x
+is one argument.
+It becomes several arguments only when
+.Ar x
+holds a list:
+.Bd -literal -offset indent
+% f := 'my file.txt'
+% touch $f                     // one file, with a space in its name
+% files := ['a.txt', 'b.txt']
+% rm $files                    // two arguments
+.Ed
+.Pp
+Command output is a string.
+To split it, say how:
+.Bd -literal -offset indent
+for f in lines(`git ls-files`) do wc -l $f
+words := split('a b  c')       // ['a', 'b', 'c']
+fields := split('x:y:z', ':')
+.Ed
+.Pp
+.Cm $( Ns Ar expr Ns Cm \&)
+puts any expression into a word:
+.Cm "echo $(n * 2) files" ,
+.Cm "cp $f $(f + '.bak')" .
+.Pp
+Globs work on literal text only.
+A glob that matches nothing is an error, not a silent literal, so
+write
+.Cm "find . -name '*.o'"
+with quotes.
+.Fn glob "'*.o'"
+returns a list that may be empty.
+.Sh 4. STATUS IS A VARIABLE
+Every command sets
+.Ev status .
+Conditions in
+.Nm concha
+are real booleans, so you test the variable:
+.Bd -literal -offset indent
+grep -q TODO notes.txt
+if status = 0 then echo 'still work to do'
+.Ed
+.Pp
+.Cm &&
+and
+.Cm ||
+still work, and are shorter for one-liners.
+.Sh 5. PROCEDURES ARE COMMANDS
+.Bd -literal -offset indent
+procedure mkcd(dir);
+begin
+  mkdir -p $dir && cd $dir
+end;
+
+mkcd /tmp/scratch              // called like a command
+mkcd('/tmp/scratch')           // or like Pascal
+.Ed
+.Pp
+A procedure gets its parameters plus the whole argument list in
+.Ev args :
+.Bd -literal -offset indent
+procedure ll; begin ls -lh $args end;
+ll /etc /tmp
+.Ed
+.Pp
+Functions return
+.Ev result :
+.Bd -literal -offset indent
+function newest(pattern);
+var best, f;
+begin
+  best := '';
+  for f in glob(pattern) do
+    if (best = '') or (int(`stat -c %Y $f`) > int(`stat -c %Y $best`)) then
+      best := f;
+  result := best
+end;
+
+vi $(newest('*.log'))
+.Ed
+.Pp
+Variables you create in a procedure are local.
+Globals can be read and assigned.
+.Sh 6. FEEDING THE SHELL
+The Bourne
+.Cm "while read"
+idiom works.
+Put a
+.Cm begin ... end
+block where the redirection should apply:
+.Bd -literal -offset indent
+count := 0
+begin
+  while readln(line) do
+    if line <> '' then inc(count)
+end < data.txt
+writeln(count, ' non-empty lines')
+.Ed
+.Pp
+A block or loop can also be a pipeline stage:
+.Cm "ps ax | while readln(l) do ..." .
+There it runs in a child process, as it would in
+.Xr sh 1 ,
+so assignments inside don't survive.
+Use the redirection form when you need the result.
+.Sh 7. HEREDOCS INDENT WITH YOUR CODE
+.Bd -literal -offset indent
+procedure usage;
+begin
+  cat <<EOF
+    usage: $prog [-v] file
+      -v   verbose
+    EOF
+end;
+.Ed
+.Pp
+The terminator's indentation is removed from every line, so the
+output starts at column 0.
+Quote the tag,
+.Cm <<'EOF' ,
+for literal text.
+.Cm <<<'text'
+feeds a single string.
+.Sh 8. SCRIPTS
+.Bd -literal -offset indent
+#!/usr/bin/env concha
+if length(args) = 0 then begin
+  echo 'usage: backup dir...' >&2
+  halt(2)
+end;
+for d in args do tar czf $(d + '.tgz') $d
+.Ed
+.Pp
+A script is parsed completely before it runs, so a syntax error on the
+last line stops it before the first line does anything.
+Calling an unknown routine is not a syntax error \(en a routine may be
+defined later in the script, or by one it sources \(en so that is
+caught only when the call itself runs.
+Errors report the file and line, even inside a file the script sources,
+and exit with status 2.
+.Sh 9. AT THE PROMPT
+The line editor uses the usual keys: arrows,
+.Ic ^A , ^E , ^W , ^U , ^K
+and
+.Ic ^R
+to search history.
+As you type, the newest history line that starts with what you have
+typed is shown dim after the cursor;
+.Ic Right
+at the end of the line takes it.
+History is saved in
+.Pa ~/.concha_history .
+Define your prompt in
+.Pa ~/.concharc :
+.Bd -literal -offset indent
+procedure prompt;
+begin
+  if status <> 0 then write(red, status, reset, ' ');
+  write(PWD, ' > ')
+end;
+.Ed
+.Pp
+.Ev red , reset
+and the other colour names hold terminal escapes, or nothing when
+colour is off.
+.Pp
+.Ic Tab
+completes commands, variables and file names.
+If nothing starts with what you typed, names holding its letters in
+order will do, so
+.Ql dwn
+finds
+.Ql Downloads .
+When several fit, they appear in a menu below the line;
+.Ic Tab
+again steps through them, and
+.Ic Enter
+takes one.
+A function named
+.Ic complete
+teaches it the arguments of your commands: it gets the command's
+words so far, the last being the one to complete, and returns what
+that word might become.
+.Bd -literal -offset indent
+function complete(words);
+begin
+  result := [];
+  if (words[0] = 'git') and (length(words) = 2) then
+    result := ['add', 'commit', 'diff', 'log', 'status']
+end;
+.Ed
+.Pp
+When it returns nothing, the program's completion file is used, if it
+has one: a few lines in
+.Pa ~/.local/share/concha/complete/ Ns Ar program
+naming its subcommands, options and operands, which
+.Ic Tab
+completes without ever running the program
+.Pq see Xr concha-complete 5 .
+Without one, file names are completed as usual.
+.Ql "writeln(completions('git c'))"
+shows what
+.Ic Tab
+would offer for a line.
+.Pp
+On a colour terminal the line is highlighted as you type: strings,
+variables and keywords each have a colour, and the command word turns
+blue once it names something that can run, red while it does not.
+Set
+.Ev NO_COLOR
+to turn all colour off.
+.Sh FROM SH TO CONCHA
+.Bl -column "while read l; do ...; done < fXX" "begin while readln(l) do ... end < fXX"
+.It Sy sh Ta Sy concha
+.It Cm x=1 Ta Cm "x := 1"
+.It Cm "export X=1" Ta Cm "export X := 1"
+.It Cm "echo \(dq$x\(dq" Ta Cm "echo $x"
+.It Cm $(cmd) Ta Cm \&`cmd\&`
+.It Cm "$((a + b))" Ta Cm "$(a + b)"
+.It Cm "diff <(a) <(b)" Ta Cm "diff <(a) <(b)"
+.It Cm "[ -f f ]" Ta Cm "isfile('f')"
+.It Cm "[ \(dq$a\(dq = \(dq$b\(dq ]" Ta Cm "a = b"
+.It Cm "if cmd; then ...; fi" Ta Cm "cmd; if status = 0 then ..."
+.It Cm "for f in *.c; do ...; done" Ta Cm "for f in glob('*.c') do ..."
+.It Cm "while read l; do ...; done < f" Ta Cm "begin while readln(l) do ... end < f"
+.It Cm "case $x in a|b) ...;; esac" Ta Cm "case x of 'a', 'b': ... end"
+.It Cm "f() { ...; }" Ta Cm "procedure f; begin ... end;"
+.It Cm "$1, $#, $@" Ta Cm "args[0], length(args), $args"
+.It Cm $? Ta Cm status
+.It Cm $$ Ta Cm pid
+.It Cm $! Ta Cm lastpid
+.It Cm "${x:-default}" Ta Cm "if not defined('x') then x := 'default'"
+.It Cm "${#x}" Ta Cm "length(x)"
+.It Cm "${x%.c}" Ta Cm "copy(x, 1, length(x) - 2)"
+.It Cm "$(basename \(dq$f\(dq .c)" Ta Cm "basename(f, '.c')"
+.It Cm "${x//a/b}" Ta Cm "replace(x, 'a', 'b')"
+.It Cm "export \(dq$n=$v\(dq" Ta Cm "setenv(n, v)"
+.It Cm "$(date +%F)" Ta Cm "time('%F')"
+.It Cm "IFS=: read a b" Ta Cm "f := split(line, ':')"
+.It Cm "trap 'rm $t' EXIT" Ta Cm "trap cleanup EXIT"
+.It Cm "set -e" Ta Cm "errexit := true"
+.It Cm "set -o pipefail" Ta Cm "pipefail := true"
+.It Cm "exit 1" Ta Cm "halt(1)"
+.It Cm ". file" Ta Cm "source file"
+.El
+.Sh EXAMPLES
+Short commented scripts, each showing a few features, are installed in
+.Pa /usr/local/share/concha/examples ,
+or under whatever prefix concha was installed with.
+Run one with
+.Ql concha file ,
+or read it first.
+.Bl -tag -width "rename-ext.cnXX"
+.It Pa hello.cn
+Greets its arguments; a usage message and
+.Ic halt .
+.It Pa count.cn
+Counts lines, words and characters like
+.Xr wc 1 ,
+with
+.Ic readln
+in a redirected block.
+.It Pa rename-ext.cn
+Changes file extensions in a directory, with a
+.Fl n
+dry run.
+.It Pa wordfreq.cn
+The most frequent words of a file: a sorted list piped to
+.Xr uniq 1 .
+.It Pa csv-sum.cn
+Adds up one column of a CSV file, chosen by name or number.
+.It Pa template.cn
+Fills a letter from variables with indented heredocs.
+.It Pa backup.cn
+Dated
+.Xr tar 1
+archives, with
+.Va errexit
+and a
+.Ic trap
+on
+.Cm EXIT
+to clean up.
+.It Pa bigfiles.cn
+The largest files under a directory, found with
+.Xr find 1
+and sorted.
+.It Pa parallel.cn
+Checksums files in background jobs, then collects each one's status
+with
+.Ic wait
+and
+.Va lastpid .
+.It Pa todo.cn
+A to-do list in
+.Pa ~/.todo :
+.Ql todo.cn add ... ,
+.Ql list
+and
+.Ql done Ar n .
+.It Pa concharc
+A commented
+.Pa ~/.concharc :
+a coloured prompt that counts the lines changed in a git or sauce tree,
+aliases as procedures,
+.Ic export
+and a
+.Ql mkcd .
+.El
+.Sh SEE ALSO
+.Xr concha 1 ,
+.Xr concha-complete 5

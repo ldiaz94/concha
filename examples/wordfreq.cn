@@ -1,0 +1,46 @@
+#!/usr/bin/env concha
+{ wordfreq.cn -- the most frequent words in a file.
+
+  Run:    concha wordfreq.cn file [n]      (n defaults to 10)
+  Shows:  split, lowcase, a function with a case range, sort, and a
+          block as the first stage of a pipeline. }
+
+if (length(args) < 1) or (length(args) > 2) then begin
+  echo 'usage: wordfreq.cn file [n]' >&2
+  halt(2)
+end;
+file := args[0];
+n := 10;
+if length(args) = 2 then n := int(args[1]);
+
+{ w in lower case, with everything but letters dropped }
+function clean(w);
+var i, c;
+begin
+  result := '';
+  w := lowcase(w);
+  for i := 1 to length(w) do begin
+    c := w[i];
+    case c of
+      'a'..'z': result := result + c
+    end
+  end
+end;
+
+words := [];
+begin
+  while readln(line) do
+    for w in split(line) do begin
+      w := clean(w);
+      if w <> '' then words := words + w     { + on a list appends }
+    end
+end < $file;
+
+{ uniq -c counts runs, so equal words must be next to each other: sort
+  them first.  The block is a pipeline stage, and its writeln goes down
+  the pipe.  Without begin ... end the pipe would belong to the loop's
+  body, and run once per word. }
+words := sort(words);
+begin
+  for w in words do writeln(w)
+end | uniq -c | sort -rn | head -n $n

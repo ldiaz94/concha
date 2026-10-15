@@ -1,0 +1,781 @@
+{ test.cn -- run with: ./concha test.cn
+
+  The concha under test, the one the checks below run, is $CONCHA
+  when that is set (make test sets it to each build in turn), else
+  ./concha. }
+
+var failed := 0
+var checked := 0
+var cn := getenv('CONCHA')
+if cn = '' then cn := "$PWD/concha"
+
+procedure check(what, got, want);
+begin
+  inc(checked);
+  if got <> want then begin
+    writeln('FAIL ', what, ': got [', got, '] want [', want, ']');
+    inc(failed)
+  end
+end;
+
+{ values }
+check('arith', 7 * 6 div 2 mod 5, 1)
+check('concat', 'a' + 1, 'a1')
+check('numeric string', '10' = 10, true)
+check('list', [1, 2] + [3], [1, 2, 3])
+check('in list', 2 in [1, 2], true)
+check('in string', 'ell' in 'hello', true)
+check('chars', 'it''s'#33, 'it''s!')
+check('index', 'pascal'[1] + [10, 20][1], 'p20')
+
+{ builtins }
+check('copy', copy('pascal', 2, 3), 'asc')
+check('pos', pos('ca', 'pascal'), 4)
+check('trim', trim('  x  '), 'x')
+check('split', split('a:b::c', ':'), ['a', 'b', '', 'c'])
+check('split blanks', split('  a  b '), ['a', 'b'])
+check('join', join([1, 2, 3], '-'), '1-2-3')
+check('lines', lines('x' + #10 + 'y' + #10), ['x', 'y'])
+check('case', upcase('ab') + lowcase('CD'), 'ABcd')
+check('match', match('main.pas', '*.p[a-z]s'), true)
+check('chr ord', chr(ord('A') + 1), 'B')
+
+{ control }
+var s := ''
+for i := 3 downto 1 do s := s + str(i)
+check('downto', s, '321')
+s := ''
+for w in ['x', 'y', 'z'] do begin
+  if w = 'y' then continue;
+  s := s + w
+end
+check('for in', s, 'xz')
+var n := 0
+repeat inc(n, 2) until n >= 7
+check('repeat', n, 8)
+case n of
+  1, 2: s := 'small';
+  8: s := 'eight'
+else
+  s := 'other'
+end
+check('case', s, 'eight')
+
+{ routines }
+function fib(n);
+begin
+  if n < 2 then exit(n);
+  result := fib(n - 1) + fib(n - 2)
+end;
+check('recursion', fib(15), 610)
+
+procedure setg; begin g := 'global' end;
+g := ''
+setg
+check('globals', g, 'global')
+
+procedure loc; begin var g := 'local' end;
+loc
+check('locals', g, 'global')
+
+function twice(n);
+var
+  a;
+  b;
+begin
+  a := n; b := n; result := a + b
+end;
+check('var on its own line', twice(4), 8)
+
+procedure argsof; begin write(length(args), ':', join(args, ',')) end;
+check('command args', `argsof a 'b c' "d"`, '3:a,b c,d')
+check('call args', `argsof(1, [2, 3])`, '2:1,2 3')
+var lst := ['p', 'q']
+check('list spreads', `argsof $lst x`, '3:p,q,x')
+
+{ commands }
+check('capture', `echo hi`, 'hi')
+check('interpolate', "n=$n, sq=$(n * n)", 'n=8, sq=64')
+check('pipe', `printf 'b\na\n' | sort | head -1`, 'a')
+check('proc in pipe', trim(`argsof 1 2 | wc -c`), '5')
+false
+check('status', status, 1)
+false || true && echo ok > /dev/null
+check('and or', status, 0)
+check('herestring', `tr a-z A-Z <<<'up'`, 'UP')
+check('heredoc', `cat <<EOF`, 'n is 8')
+  n is $n
+  EOF
+check('raw heredoc', `cat <<'EOF'`, '$n')
+$n
+EOF
+check('stderr', `sh -c 'echo e >&2' 2>&1`, 'e')
+check('block pipe', `begin echo 2; echo 1 end | sort | head -1`, '1')
+var total := 0
+begin
+  while readln(line) do total := total + int(line)
+end <<EOF
+1
+2
+3
+EOF
+check('block stdin', total, 6)
+check('glob', glob('/etc/host*') = [], false)
+check('quoted glob', `echo '/etc/*'`, '/etc/*')
+check('env', `sh -c 'echo $HOME'`, HOME)
+check('tilde', `echo ~ ~/x`, HOME + ' ' + HOME + '/x')
+check('tilde user', `echo ~root ~root/x`, '/root /root/x')
+check('tilde no user', `echo ~nosuchuser/x`, '~nosuchuser/x')
+check('tilde not first', `echo a~root '~root' ~root.x`, 'a~root ~root ~root.x')
+check('tilde assign', `echo X=~/a P=~/a:~root:b~ X=a=~ x-y=~ 1X=~`,
+  'X=' + HOME + '/a P=' + HOME + '/a:/root:b~ X=a=~ x-y=~ 1X=~')
+check('tilde assign quoted', `echo "X=~/a" 'X=~/a' X=\~/a X=a\:~`, 'X=~/a X=~/a X=~/a X=a:~')
+export CONCHA_T := 'yes'
+check('export', `sh -c 'echo $CONCHA_T'`, 'yes')
+check('bare end', `echo the end is near`, 'the end is near')
+check('bare until else', `echo until or else`, 'until or else')
+procedure elseblk; begin if true then begin echo else end end;
+check('else in block', `elseblk`, 'else')
+check('if else cmd', `if false then echo a else echo b`, 'b')
+check('nested else', `if true then if false then echo a else echo b else echo c`, 'b')
+procedure caseelse; begin case 2 of 1: echo one else echo other end end;
+check('case else cmd', `caseelse`, 'other')
+var got := ''
+begin
+  echo x > /nonexistent/f
+  got := str(status) + 'x'
+  writeln(1) > /nonexistent/f
+  got := got + str(status)
+end 2> /dev/null
+check('bad redirect continues', got, '1x1')
+
+var homedir := PWD
+cd /tmp; cd /; cd - > /dev/null
+check('cd -', PWD, '/tmp')
+cd /
+check('cd - prints', `cd -`, '/tmp')
+check('oldpwd exported', `sh -c 'echo $OLDPWD'`, OLDPWD)
+
+var errfile := '/tmp/concha_test_errfile'
+rm -f $errfile
+touch $errfile
+cd $errfile 2> /dev/null
+check('cd not a directory status', status, 1)
+check('cd not a directory message', `cd $errfile 2>&1`, 'concha: cd: ' + errfile + ': not a directory')
+rm -f $errfile
+
+var m000 := '/tmp/concha_test_mode000'
+rm -rf $m000
+mkdir $m000
+chmod 000 $m000
+if `id -u` <> '0' then check('cd permission denied', `cd $m000 2>&1`, 'concha: cd: ' + m000 + ': permission denied')
+chmod 755 $m000
+rmdir $m000
+
+cd $homedir
+
+{ unknown routines }
+check('unknown routine stmt', `$cn -c 'nosuch(1)' 2>&1`, 'concha: 1: unknown routine nosuch')
+check('unknown routine stmt status', status, 2)
+check('unknown routine assign', `$cn -c 'x := nosuch(1)' 2>&1`, 'concha: 1: unknown routine nosuch')
+check('unknown routine writeln arg', `$cn -c 'writeln(nosuch(1))' 2>&1`, 'concha: 1: unknown routine nosuch')
+check('command style unaffected', `$cn -c 'procedure greet(n); begin echo hi $n end; greet bob'`, 'hi bob')
+
+{ did-you-mean suggestions }
+check('routine suggestion', `$cn -c 's := "hi"; writeln(lenght(s))' 2>&1`,
+  'concha: 1: unknown routine lenght; did you mean length?')
+check('variable suggestion', `$cn -c 'frobnicate := 1; writeln(frobnicat)' 2>&1`,
+  'concha: 1: undefined variable frobnicat; did you mean frobnicate?')
+check('no suggestion far off', `$cn -c 'frobnicate := 1; writeln(qwzxyplonkbargle)' 2>&1`,
+  'concha: 1: undefined variable qwzxyplonkbargle')
+
+{ errors name the file the failing statement came from }
+var errdir := '/tmp/concha_test_where'
+var sh := cn
+mkdir -p $errdir
+writeln('echo -n'#10'x := 1 div 0') > "$errdir/bad.cn"
+writeln('if then') > "$errdir/syn.cn"
+writeln('procedure f; begin'#10'  x := nosuch'#10'end;') > "$errdir/lib.cn"
+writeln('procedure g; begin end;'#10'echo -n'#10'x := g() + nosuch') > "$errdir/after.cn"
+check('error in sourced file', `cd $errdir; $sh -c 'source bad.cn' 2>&1`,
+  'concha: bad.cn:2: division by zero')
+check('syntax error in sourced file', `cd $errdir; $sh -c 'source syn.cn' 2>&1`,
+  'concha: syn.cn:1: unexpected ''then''')
+check('error in procedure from a file', `cd $errdir; $sh -c 'source lib.cn; f' 2>&1`,
+  'concha: lib.cn:2: undefined variable nosuch')
+check('error after a call', `$sh $errdir/after.cn 2>&1`,
+  'concha: ' + errdir + '/after.cn:3: undefined variable nosuch')
+check('typed line has no place',
+  'concha: undefined variable nosuch' in `echo 'x := nosuch' | env HOME=/nonexistent $sh -i 2>&1 >/dev/null`, true)
+rm -r $errdir
+
+
+{ captures hold a statement list }
+check('capture list', `echo a; echo b`, 'a'#10'b')
+check('capture block', `begin echo a; echo b end`, 'a'#10'b')
+check('capture newline', `echo a
+echo b`, 'a'#10'b')
+check('capture nested', `echo x $(`echo y; echo z`)`, 'x y'#10'z')
+check('capture background', `echo a & wait; echo b`, 'a'#10'b')
+check('capture statements', `n := 3; writeln(n * 2)`, '6')
+check('capture status', `echo a; false` + str(status), 'a1')
+
+{ <(list): a /dev/fd/N to read the list's output from }
+var fds0 := length(lines(`ls /proc/self/fd`))
+check('procsub', `cat <(echo hi)`, 'hi')
+check('procsub two', `cat <(echo a) <(echo b)`, 'a'#10'b')
+check('procsub same', `diff <(echo a) <(echo a); writeln(status)`, '0')
+check('procsub differ', `diff <(echo a) <(echo b) > /dev/null; writeln(status)`, '1')
+check('procsub status ignored', `cat <(false); writeln(status)`, '0')
+check('procsub redirection', `cat < <(echo in)`, 'in')
+check('procsub builtin', `readln(x) < <(echo rl); writeln(x)`, 'rl')
+procedure catargs; begin cat $args end;
+check('procsub procedure', `catargs <(echo pr)`, 'pr')
+check('procsub list', `cat <(echo a; echo b)`, 'a'#10'b')
+check('procsub nested', `cat <(cat <(echo d) <(echo `echo e`))`, 'd'#10'e')
+check('procsub quoted )', `cat <(echo ')')`, ')')
+check('procsub reader quits', `head -1 <(yes)`, 'y')
+check('procsub in pipeline', `cat <(echo p) | cat`, 'p')
+check('procsub fds closed', length(lines(`ls /proc/self/fd`)), fds0)
+check('procsub word of its own', `$cn -c 'echo <(true)x' 2>&1`,
+  'concha: 1: <(...) must be a word of its own')
+check('procsub glued after', `$cn -c 'echo x<(true)' 2>&1`,
+  'concha: 1: <(...) must be a word of its own')
+check('procsub glued quoted', `$cn -c 'echo "x"<(true)' 2>&1`,
+  'concha: 1: <(...) must be a word of its own')
+check('3<( is an fd redirection', `$cn -c 'cat 3<(nofile)' 2>&1`,
+  'concha: 1: (nofile): cannot open: no such file or directory')
+check('procsub on fd 3', `cat 3< <(echo a) /dev/fd/3`, 'a')
+check('procsub unclosed', `$cn -c 'cat <(echo a' 2>&1`, 'concha: 1: expected ) closing <(')
+check('< ( is a redirection', `cat 2> /dev/null < (nofile); writeln(status)`, '1')
+check('procsub errexit ignores', `$cn -c 'errexit := true; cat <(false); echo on'`, 'on')
+
+{ exec }
+check('exec command', `exec echo hi`, 'hi')
+var execf := '/tmp/concha_test_exec'
+check('exec fd', `exec 3> $execf; echo x >&3; cat $execf`, 'x')
+check('exec redirects shell', `$cn -c "exec > $execf; echo y"; cat $execf`, 'y')
+rm -f $execf
+check('exec not found', `exec nosuchcmd 2>&1; writeln(status)`, 'concha: nosuchcmd: not found'#10'127')
+
+{ umask and unset }
+var oldmask := `umask`
+umask 077
+check('umask', `umask`, '0077')
+umask $oldmask
+check('umask bad', `umask 9 2>&1; writeln(status)`, 'concha: umask: not an octal mode: 9'#10'1')
+var ux := 1
+unset ux nosuchvar
+check('unset', defined('ux'), false)
+export CONCHA_U := 1
+unset CONCHA_U
+check('unset env', `sh -c 'echo ${CONCHA_U-gone}'`, 'gone')
+procedure unsetlocal; begin var l := 1; unset l; write(defined('l')) end;
+check('unset local', `unsetlocal`, 'false')
+
+{ variables named at run time }
+var en := 'CONCHA_ENV'
+setenv(en, 42)
+check('setenv', CONCHA_ENV, '42')
+check('setenv exports', `sh -c 'echo $CONCHA_ENV'`, '42')
+check('getenv', getenv(en), '42')
+check('getenv unset', getenv('CONCHA_NO_SUCH'), '')
+var notexp := 1
+check('getenv not exported', getenv('notexp'), '')
+check('environ', en in environ(), true)
+check('environ no plain globals', 'notexp' in environ(), false)
+check('environ sorted', environ(), sort(environ()))
+procedure setlocal; begin var CONCHA_ENV := 'l'; setenv('CONCHA_ENV', 'g'); write(CONCHA_ENV, getenv('CONCHA_ENV')) end;
+check('setenv global under a local', `setlocal`, 'lg')
+unset $en
+check('unset by name', getenv(en) + str(defined(en)), 'false')
+check('setenv bad name', `$cn -c 'setenv("A=B", 1)' 2>&1`,
+  'concha: 1: setenv: not a variable name')
+check('setenv read-only', `$cn -c 'setenv("pid", 1)' 2>&1`,
+  'concha: 1: pid: read-only variable')
+
+{ ulimit }
+check('ulimit -n', int(`ulimit -n`) > 0, true)
+check('ulimit set', `ulimit -t 1000; ulimit -t`, '1000')
+check('ulimit bad', `ulimit -x 2>&1`, 'concha: ulimit: unknown option -x')
+
+{ trap and pid }
+check('trap exit', `$cn -c 'procedure bye; begin echo bye end; trap bye EXIT; echo hi'`, 'hi'#10'bye')
+check('trap exit halt', `$cn -c 'procedure bye; begin echo bye end; trap bye EXIT; halt(3)'; writeln(status)`, 'bye'#10'3')
+var trapped := ''
+procedure onusr1; begin trapped := 'usr1' end;
+trap onusr1 USR1
+kill -USR1 $pid
+check('trap signal', trapped, 'usr1')
+trap - USR1
+trap '' USR2
+kill -USR2 $pid
+check('trap ignore', status, 0)
+trap - USR2
+check('trap unknown', `trap x FOO 2>&1`, 'concha: trap: unknown signal FOO')
+check('pid', `sh -c 'echo $PPID'`, pid)
+check('pid read-only', `$cn -c 'pid := 1' 2>&1`, 'concha: 1: pid: read-only variable')
+
+{ errexit and pipefail }
+check('errexit off', `false; echo on`, 'on')
+check('errexit stops', `$cn -c 'errexit := true; echo a; false; echo b'; writeln(status)`, 'a'#10'1')
+check('errexit left of &&', `$cn -c 'errexit := true; false && echo x; echo c'`, 'c')
+check('errexit right of ||', `$cn -c 'errexit := true; false || false; echo no'; writeln(status)`, '1')
+check('errexit right of &&', `$cn -c 'errexit := true; true && false; echo no'; writeln(status)`, '1')
+check('errexit capture', `$cn -c 'errexit := true; x := `false; echo in`; echo $x'`, 'in')
+check('errexit proc left of ||', `$cn -c 'errexit := true; procedure f; begin false; echo in end; f || echo; echo out'`, 'in'#10'out')
+check('errexit exit trap', `$cn -c 'procedure bye; begin echo bye $status end; trap bye EXIT; errexit := true; sh -c "exit 7"; echo no'; writeln(status)`, 'bye 7'#10'7')
+false | true
+check('pipefail off', status, 0)
+pipefail := true
+false | true
+check('pipefail', status, 1)
+true | sh -c 'exit 3' | true
+check('pipefail last failure', status, 3)
+pipefail := false
+
+{ wait and lastpid }
+check('lastpid before jobs', `$cn -c 'writeln(lastpid)'`, '0')
+false & wait
+check('wait status', status, 1)
+sleep 0 & wait $lastpid
+check('wait pid', status, 0)
+sh -c 'exit 5' &
+wait $lastpid
+check('wait pid status', status, 5)
+wait 1
+check('wait not a child', status, 127)
+for i := 1 to 80 do true &
+wait
+check('many jobs', status, 0)
+
+{ killing lastpid stops the whole background list }
+sleep 41.7 | sleep 41.8 &
+var bg := lastpid
+sleep 0.2
+kill $bg
+wait $bg
+check('kill background pipeline', status, 143)
+sleep 0.1
+check('pipeline stages killed', `pgrep -f '^sleep 41[.][78]$'`, '')
+begin sleep 41.9; true end &
+bg := lastpid
+sleep 0.2
+kill -USR1 $bg
+wait $bg
+check('kill background block', status, 138)
+sleep 0.1
+check('block command killed', `pgrep -f '^sleep 41[.]9$'`, '')
+$cn -c 'sleep 42.1 | sleep 42.2 & wait' &
+bg := lastpid
+sleep 0.3
+kill -HUP $bg
+wait $bg
+check('hangup a script', status, 129)
+sleep 0.1
+check('script passes hangup on', `pgrep -f '^sleep 42[.][12]$'`, '')
+
+{ jobs, fg and bg without job control }
+check('jobs', `sleep 0.2 & sleep 0.2 | cat & jobs | sed 's/ [0-9][0-9]* / /'; wait`,
+  '[1]  running sleep 0.2'#10'[2]+ running sleep 0.2 | cat')
+check('jobs after wait', `sleep 0 & wait; jobs`, '')
+check('fg without job control', `fg 2>&1`, 'concha: fg: no job control')
+check('bg no such job', `bg %3 2>&1`, 'concha: bg: no such job: %3')
+check('bg no current job', `bg 2>&1`, 'concha: bg: no current job')
+check('disown', `sleep 0.2 & sleep 0.2 | cat & disown %1; jobs | sed 's/ [0-9][0-9]* / /'; wait`,
+  '[2]+ running sleep 0.2 | cat')
+check('disown no such job', `disown 3 2>&1`, 'concha: disown: no such job: 3')
+$cn -c 'sleep 42.3 & disown; sleep 42.4 & wait' &
+bg := lastpid
+sleep 0.3
+kill -HUP $bg
+wait $bg
+check('hangup passes a disowned job by', `pgrep -fa '^sleep 42[.][34]$' | cut -d' ' -f2-`, 'sleep 42.3')
+pkill -f '^sleep 42[.]3$'
+
+{ options terminals and login programs pass }
+check('-l', `$cn -l -c 'echo $args' a`, 'a')
+check('-li', `$cn -li -il -c 'echo $args' a`, 'a')
+check('-i without a terminal', `echo 'echo hi' | env HOME=/nonexistent $cn -i 2>/dev/null`, 'hi')
+
+{ an error in a file the prompt sources: status 1, and the prompt stays }
+var rcdir := '/tmp/concha_test_rc'
+mkdir -p $rcdir
+writeln('x := 1 div 0') > "$rcdir/bad.cn"
+writeln('procedure prompt; begin source ', rcdir, '/bad.cn; write(''P'', status, ''> '') >&2 end;') > "$rcdir/.concharc"
+check('source error in prompt', `echo 'echo hi' | env HOME=$rcdir $cn -i 2>&1 >/dev/null`,
+  'concha: /tmp/concha_test_rc/bad.cn:1: division by zero'#10'P1> ' +
+  'concha: /tmp/concha_test_rc/bad.cn:1: division by zero'#10'P1> ')
+rm -r $rcdir
+check('sh assignment hint', `FOO=bar env 2>&1`,
+  'concha: FOO=bar: not found; to set it, FOO := ...; for one command, env FOO=bar command')
+
+{ ENOEXEC and a default PATH }
+var noshebang := '/tmp/concha_test_noshebang'
+writeln('echo "plain $1"') > $noshebang
+chmod +x $noshebang
+check('no #! line', `$noshebang x`, 'plain x')
+rm -f $noshebang
+check('empty PATH', `PATH := ''; ls -d /`, '/')
+check('unset PATH', `unset PATH; ls -d /`, '/')
+
+{ replace }
+check('replace', replace('a-b-c', '-', '+'), 'a+b+c')
+check('replace overlapping', replace('aaa', 'aa', 'b'), 'ba')
+check('replace none', replace('abc', 'x', 'y'), 'abc')
+check('replace delete', replace('abab', 'ab', ''), '')
+check('replace numbers', replace(123, 2, 'two'), '1two3')
+check('replace empty', `$cn -c "replace('a', '', 'b')" 2>&1`, 'concha: 1: replace: nothing to replace')
+
+{ basename and dirname }
+check('basename', basename('/a/b.html'), 'b.html')
+check('basename suffix', basename('/a/b.html', '.html'), 'b')
+check('basename suffix whole', basename('.html', '.html'), '.html')
+check('basename suffix absent', basename('b.htm', '.html'), 'b.htm')
+check('basename trailing', basename('a/b//'), 'b')
+check('basename root', basename('//'), '/')
+check('basename plain', basename('b'), 'b')
+check('basename empty', basename(''), '')
+check('dirname', dirname('/a/b'), '/a')
+check('dirname top', dirname('/a'), '/')
+check('dirname trailing', dirname('a//b/'), 'a')
+check('dirname root', dirname('/'), '/')
+check('dirname plain', dirname('b'), '.')
+check('dirname empty', dirname(''), '.')
+check('basename command', `basename /a/b.c .c`, 'b')
+
+{ sort }
+var unsorted := [10, 9, 100, 1, 55, 3, 3, 7, 0, -4]
+check('sort', sort(unsorted), [-4, 0, 1, 3, 3, 7, 9, 10, 55, 100])
+check('sort copies', unsorted[0], 10)
+check('sort strings', sort(['pear', 'apple', 'fig']), ['apple', 'fig', 'pear'])
+check('sort mixed', sort(['10', 9]), [9, '10'])
+check('sort string numbers', sort(['10', '9']), ['10', '9'])
+check('sort empty', sort([]), [])
+check('sort not a list', `$cn -c "sort('x')" 2>&1`, 'concha: 1: sort needs a list, got string')
+check('sort command alone', `printf 'b\na\n' | sort`, 'a'#10'b')
+
+{ braced variable names }
+var bx := 'a'
+check('braced in string', "${HOME}x", HOME + 'x')
+check('braced in word', `echo ${bx}y`, 'ay')
+check('braced list', `argsof ${lst}`, '2:p,q')
+check('braced heredoc', `cat <<EOF`, 'hah')
+  h${bx}h
+  EOF
+check('braced unclosed', `$cn -c 'echo ${bx' 2>&1`, 'concha: 1: expected ${name}')
+
+{ |& }
+check('pipe stderr', 'No such file' in `ls /nonexistent |& cat`, true)
+procedure tostderr; begin echo e >&2 end;
+check('pipe stderr proc', `tostderr |& tr e E`, 'E')
+check('pipe stderr at end', `$cn -c 'ls |&' 2>&1`, 'concha: 1: expected a command')
+
+{ integer overflow }
+var imax := 9223372036854775807
+var imin := -imax - 1
+procedure ovf(e); begin write(`$cn -c "writeln($e)" 2>&1`) end;
+check('max + 1', `ovf '9223372036854775807 + 1'`, 'concha: 1: integer overflow')
+check('min - 1', `ovf '-9223372036854775807 - 2'`, 'concha: 1: integer overflow')
+check('neg min', `ovf '-(-9223372036854775807 - 1)'`, 'concha: 1: integer overflow')
+check('mul', `ovf '3037000500 * 3037000500'`, 'concha: 1: integer overflow')
+check('int 20 digits', `ovf "int('99999999999999999999')"`, 'concha: 1: 99999999999999999999: integer overflow')
+check('int min', int('-9223372036854775808'), imin)
+check('literal', `ovf '99999999999999999999'`, 'concha: 1: integer overflow')
+check('inc max', `$cn -c 'x := 9223372036854775807; inc(x)' 2>&1`, 'concha: 1: integer overflow')
+check('div min', `ovf '(-9223372036854775807 - 1) div -1'`, 'concha: 1: integer overflow')
+check('edges', imax + imin, -1)
+var ncount := 0
+for i := imax - 1 to imax do inc(ncount)
+check('for to max', ncount, 2)
+
+{ case ranges }
+function charkind(c);
+begin
+  case c of
+    'a'..'z': result := 'lower';
+    'A'..'Z', '_': result := 'upper';
+    0..9: result := 'digit';
+    10, 20..29: result := 'num'
+  else
+    result := 'other'
+  end
+end;
+check('range string', charkind('q'), 'lower')
+check('range mixed with label', charkind('_'), 'upper')
+check('range integer', charkind(5), 'digit')
+check('range numeric string', charkind('7'), 'digit')
+check('range after label', charkind(25), 'num')
+check('range miss', charkind(15), 'other')
+check('range incomparable', charkind([1]), 'other')
+
+{ loop redirection pitfall }
+check('loop body redirect', `$cn -c 'while readln(l) do writeln(l) <<< "a"' 2>&1`,
+  'concha: 1: redirection applies to the loop body; wrap the loop in begin ... end')
+check('loop wrapped', `begin while readln(l) do writeln(l) end <<< 'a'`, 'a')
+check('loop command redirect', `echo /dev/null | while readln(f) do wc -c < $f`, '0')
+
+{ the clock: fixed instants, in a pinned zone }
+function utc(f, ms);
+begin
+  result := `env TZ=:UTC F=$f MS=$ms $cn -c 'write(time(F, int(MS)))'`
+end;
+
+check('time epoch', utc('%F %T %a %A %z %Z', 0), '1970-01-01 00:00:00 Thu Thursday +0000 UTC')
+check('time leap day', utc('%Y%m%d %b %B %e %y', 951782400000), '20000229 Feb February 29 00')
+check('time before epoch', utc('%F %T %a', -1), '1969-12-31 23:59:59 Wed')
+check('time seconds and short forms', utc('%s %R %T %%', 1790974296368), '1790974296 20:51 20:51:36 %')
+check('time zone', `env TZ=:America/New_York $cn -c 'write(time("%T %Z %z", 0))'`, '19:00:00 EST -0500')
+check('time unknown', `$cn -c 'time("%Q")' 2>&1`, 'concha: 1: unknown time format %Q')
+check('time now', time('%F') = `date +%F`, true)
+check('now ticks', (now() > 1700000000000) and (now() - now() <= 0), true)
+
+{ colour }
+check('plain errors off a terminal', #27 in `$cn -c 'writeln(nosuch)' 2>&1`, false)
+check('colour names off', `$cn -c 'write(length(red + bold + reset))' 2>&1`, '0')
+
+{ brace comment after a call or statement }
+check('comment after call', `writeln(1) { note }`, '1')
+check('comment after block', `begin echo a end { note }`, 'a')
+
+{ Ctrl-C: wait and see what the child did with it }
+check('caught interrupt', `$cn -c 'for i := 1 to 2 do sh -c "trap : INT; kill -INT \$PPID; kill -INT \$\$"; write(9)'`, '9')
+check('fatal interrupt', `$cn -c 'for i := 1 to 2 do sh -c "kill -INT \$PPID; kill -INT \$\$"; write(9)' 2>/dev/null; echo $status`, '130')
+
+{ -n: parse only }
+check('parse only runs nothing', `echo 'echo ran' | $cn -n; echo $status`, '0')
+check('parse only reports', `echo 'while do' | $cn -n 2>&1; echo $status`,
+  'concha: 1:7: unexpected ''do'''#10'2')
+
+{ the first syntax error's line and byte column: -n and -q check }
+var qdir := '/tmp/concha_test_query'
+mkdir -p $qdir
+writeln('echo a'#10'x := "abc') > "$qdir/quote.cn"
+writeln('begin'#10'  echo a') > "$qdir/end.cn"
+writeln('if (1 = 1)) then echo y') > "$qdir/paren.cn"
+writeln('cat <<EOF'#10'body'#10'EOF'#10'x := 1 +'#10'  then') > "$qdir/heredoc.cn"
+writeln('echo "été"; x := 1 / 2') > "$qdir/utf8.cn"
+writeln('echo ok') > "$qdir/good.cn"
+writeln('cat x<(echo a)') > "$qdir/glued.cn"
+check('-n column', `$cn -n $qdir/quote.cn 2>&1; echo $status`,
+  'concha: ' + qdir + '/quote.cn:2:6: unterminated string'#10'2')
+check('-n column after heredoc', `$cn -n $qdir/heredoc.cn 2>&1`,
+  'concha: ' + qdir + '/heredoc.cn:5:3: unexpected ''then''')
+check('-q check unclosed quote', `$cn -q check $qdir/quote.cn; echo $status`,
+  '2'#9'6'#9'unterminated string'#10'0')
+check('-q check missing end', `$cn -q check $qdir/end.cn`, '3'#9'1'#9'expected ''end''')
+check('-q check stray paren', `$cn -q check $qdir/paren.cn`, '1'#9'11'#9'expected ''then''')
+check('-q check after heredoc', `$cn -q check $qdir/heredoc.cn`, '5'#9'3'#9'unexpected ''then''')
+check('-q check bytes', `$cn -q check $qdir/utf8.cn`, '1'#9'22'#9'there is no ''/'', use div')
+check('-q check stdin', `$cn -q check - < $qdir/paren.cn`, '1'#9'11'#9'expected ''then''')
+check('-n glued <(', `$cn -n $qdir/glued.cn 2>&1; echo $status`,
+  'concha: ' + qdir + '/glued.cn:1:6: <(...) must be a word of its own'#10'2')
+check('-q check glued <(', `$cn -q check $qdir/glued.cn`,
+  '1'#9'6'#9'<(...) must be a word of its own')
+check('-q check good', `$cn -q check $qdir/good.cn 2>&1; echo $status`, '0')
+check('-q unknown kind', `$cn -q nosuch $qdir/good.cn 2>&1; echo $status`,
+  'concha: -q: unknown query: nosuch'#10'2')
+check('-q no script', `$cn -q check 2>/dev/null; echo $status`, '2')
+check('-q unreadable', `$cn -q check $qdir/none.cn 2>/dev/null; echo $status`, '2')
+check('usage names -q', '-q check' in `$cn --help`, true)
+
+{ -q outline: procs and funcs at any depth, vars outside them }
+writeln('var a := 1, b'#10'export E := "x"'#10'procedure outer(x)'#10 +
+  'var loc := 2'#10'begin'#10'  procedure inner;'#10'  begin'#10 +
+  '    echo in'#10'  end'#10'  inner'#10'end'#10'function  sq(n): integer;'#10 +
+  'begin'#10'  result := n * n'#10'end') > "$qdir/outline.cn"
+check('-q outline', `$cn -q outline $qdir/outline.cn; echo $status`,
+  'var'#9'a'#9'1'#9'5'#9'1'#10'var'#9'b'#9'1'#9'13'#9'1'#10 +
+  'var'#9'E'#9'2'#9'8'#9'2'#10'proc'#9'outer'#9'3'#9'11'#9'11'#10 +
+  'proc'#9'inner'#9'6'#9'13'#9'9'#10'func'#9'sq'#9'12'#9'11'#9'15'#10'0')
+writeln('') > "$qdir/empty.cn"
+check('-q outline empty', `$cn -q outline $qdir/empty.cn; echo $status`, '0')
+writeln('procedure p'#10'begin'#10'end'#10'procedure q'#10'begin'#10 +
+  '  echo "a'#10'end'#10'procedure r'#10'begin end') > "$qdir/broken.cn"
+check('-q outline up to an error', `$cn -q outline $qdir/broken.cn; echo $status`,
+  'proc'#9'p'#9'1'#9'11'#9'3'#10'proc'#9'q'#9'4'#9'11'#9'6'#10'0')
+
+{ -q words: the words at a place, by kind }
+writeln('var top := 1'#10'procedure outer(x, y)'#10'var loc := 2'#10'begin'#10 +
+  '  procedure inner(z)'#10'  begin'#10'    echo in'#10'  end'#10'  inner'#10 +
+  'end'#10'var later := 3'#10'function sq(n): integer;'#10'begin'#10 +
+  '  result := n'#10'end') > "$qdir/words.cn"
+function words(where, kinds)
+var r := []
+begin
+  for l in lines(`$cn -q words $qdir/words.cn:$where | grep -E "^($kinds)"`) do
+    r := r + [split(l, #9)[1]]
+  result := join(r, ' ')
+end
+check('-q words top', words('1:1', 'proc|func|var'), 'outer inner sq')
+check('-q words in a proc', words('7:5', 'var'), 'top x y loc z')
+check('-q words in the outer proc', words('9:3', 'var'), 'top x y loc')
+check('-q words after a var', words('11:1', 'var'), 'top')
+check('-q words later var', words('12:1', 'var'), 'top later n')
+check('-q words func', words('14:3', 'proc|func|var'), 'outer inner sq top later n')
+check('-q words signature', `$cn -q words $qdir/words.cn:1:1 | grep "^proc.outer"`,
+  'proc'#9'outer'#9'outer(x, y)')
+check('-q words keyword', `$cn -q words $qdir/words.cn:1:1 | grep "^keyword.begin"`,
+  'keyword'#9'begin'#9)
+check('-q words builtin', `$cn -q words $qdir/words.cn:1:1 | grep "^builtin.copy"`,
+  'builtin'#9'copy'#9'copy(x, i[, n])')
+writeln('var a'#10'procedure p(q)'#10'begin'#10'  echo "x'#10'end'#10 +
+  'function later(a, b)'#10'begin end') > "$qdir/wbroken.cn"
+check('-q words broken', `$cn -q words $qdir/wbroken.cn:4:1 | grep -E "^(proc|func|var)" | cut -f1,2`,
+  'proc'#9'p'#10'func'#9'later'#10'var'#9'a'#10'var'#9'q')
+check('-q words no position', `$cn -q words $qdir/words.cn 2>/dev/null; echo $status`, '2')
+{ every detail is the one concha.1 shows }
+var man := `env GROFF_NO_SGR=1 groff -mdoc -Tascii -rLL=300n concha.1 | col -b`
+var missing := ''
+for l in lines(`$cn -q words $qdir/words.cn:1:1 | grep "^builtin"`) do
+  if not (split(l, #9)[2] in man) then missing := missing + ' ' + split(l, #9)[2]
+check('-q words details in concha.1', missing, '')
+
+{ -q dump (hidden): where the names of commands and calls are }
+writeln('procedure p'#10'begin'#10'  echo hi'#10'end'#10'p'#10'ls -l; p a b'#10 +
+  'x := f(1) + g(h(2))'#10'"p"'#10'''p'' x'#10'if f(2) then q'#10 +
+  'echo `p`; x := length(x)') > "$qdir/dump.cn"
+check('-q dump', `$cn -q dump $qdir/dump.cn; echo $status`,
+  'echo'#9'3'#9'3'#9'4'#10'p'#9'5'#9'1'#9'1'#10'ls'#9'6'#9'1'#9'2'#10 +
+  'p'#9'6'#9'8'#9'1'#10'f'#9'7'#9'6'#9'1'#10'g'#9'7'#9'13'#9'1'#10 +
+  'h'#9'7'#9'15'#9'1'#10'f'#9'10'#9'4'#9'1'#10'q'#9'10'#9'14'#9'1'#10 +
+  'echo'#9'11'#9'1'#9'4'#10'p'#9'11'#9'7'#9'1'#10'0')
+
+{ -q def: a call, a call before its declaration, a nested proc shadowing
+  an outer one, a builtin, an external, whitespace, a declaration }
+writeln('early'#10'procedure early'#10'begin'#10'  echo hi'#10'end'#10 +
+  'procedure p'#10'begin'#10'  procedure p'#10'  begin'#10'    p'#10'  end'#10 +
+  '  x := length(p)'#10'  p'#10'end'#10'p'#10'ls; x := early()') > "$qdir/def.cn"
+function def(where)
+begin
+  result := `$cn -q def $qdir/def.cn:$where; echo $status`
+end
+check('-q def call before', def('1:2'), '2'#9'11'#9'early'#10'0')
+check('-q def declaration', def('2:12'), '2'#9'11'#9'early'#10'0')
+check('-q def inner call', def('10:5'), '8'#9'13'#9'p'#10'0')
+check('-q def inner, in outer', def('13:3'), '8'#9'13'#9'p'#10'0')
+check('-q def outer', def('15:1'), '6'#9'11'#9'p'#10'0')
+check('-q def expression call', def('16:12'), '2'#9'11'#9'early'#10'0')
+check('-q def builtin', def('12:8'), '0')
+check('-q def external', def('16:1'), '0')
+check('-q def whitespace', def('4:1'), '0')
+check('-q def needs a place', `$cn -q def $qdir/def.cn 2>/dev/null; echo $status`, '2')
+rm -r $qdir
+
+{ completions(): what Tab offers, against a scratch directory }
+var cdir := '/tmp/concha_test_complete'
+rm -rf $cdir
+mkdir -p $cdir/bin $cdir/sub $cdir/Downloads
+touch $cdir/sfile $cdir/bin/zzone $cdir/bin/zztwo $cdir/bin/zzdata
+chmod +x $cdir/bin/zzone $cdir/bin/zztwo
+{ completion files come from here alone, never from the real ones }
+mkdir -p $cdir/data/concha/complete $cdir/usr/concha/complete
+setenv('XDG_DATA_HOME', cdir + '/data')
+setenv('XDG_DATA_DIRS', cdir + '/none:' + cdir + '/usr')
+check('complete command', `env PATH=$cdir/bin $cn -c 'write(join(completions("zz"), " "))'`, 'zzone zztwo')
+check('complete keyword', 'while' in completions('whi'), true)
+check('complete command after |', 'while' in completions('ls | whi'), true)
+var zzvar1 := 1
+check('complete $name', completions('echo $zzva'), ['$zzvar1'])
+check('complete expression', completions('x := lengt'), ['length'])
+check('complete expression in call', 'zzvar1' in completions('writeln(zzv'), true)
+check('complete file', completions('cat ' + cdir + '/s'), [cdir + '/sfile', cdir + '/sub/'])
+check('complete cd', completions('cd ' + cdir + '/s'), [cdir + '/sub/'])
+check('complete quoted', completions('cat "' + cdir + '/sf'), [cdir + '/sfile'])
+check('complete ~user', '~root/' in completions('ls ~roo'), true)
+check('complete fuzzy', completions('cat ' + cdir + '/dwn'), [cdir + '/Downloads/'])
+check('complete nothing', completions('cat ' + cdir + '/qqq'), [])
+function complete(words);
+begin
+  result := [];
+  if words[0] = 'zzcmd' then result := ['alpha', 'beta', 'albino'];
+  if words[0] = 'zzlines' then result := 'one'#10'two'#10
+end;
+check('complete function', completions('zzcmd al'), ['albino', 'alpha'])
+check('complete function lines', completions('zzlines t'), ['two'])
+check('complete function fuzzy', completions('zzcmd bt'), ['beta'])
+check('complete function empty', completions('cat ' + cdir + '/sf'), [cdir + '/sfile'])
+check('complete function keeps status', `false; x := completions('zzcmd a'); echo $status`, '1')
+
+{ completion files, concha-complete(5), from the scratch XDG dirs }
+var cfiles := cdir + '/data/concha/complete'
+cat > $cfiles/tlo <<'EOF'
+	complete 1
+	# tlo(1)
+	sub  -      start stop log ls bar rm
+	opt  -      h help
+	opt  start  b bar     word
+	arg  start  1         word
+	arg  start  2         command
+	opt  log    f follow
+	opt  log    n lines   one 10 100 1000
+	arg  log    1         in $ZZJOBS
+	arg  stop   1         in ${ZZJOBS}
+	arg  rm     1         in $ZZJOBS/nope
+	arg  bar    1         in $ZZUNSET/x
+	arg  ls     1         dir
+	EOF
+cat > $cfiles/zgit <<'EOF'
+	complete 1
+	sub remote add remove
+	sub - remote commit
+	opt remote.add t track word
+	arg remote.add 1 one origin upstream
+	arg remote.add 2 word
+	doc - remote Manage\ remotes
+	opt - toolong x
+	opt - y --yes
+	opt - o out file
+	arg commit 1 colour
+	arg commit 2 one a\ b c\#d # a comment
+	arg commit 3 word extra fields
+	EOF
+writeln('complete 2'#10'sub - newer') > $cfiles/zver
+writeln('complete 1'#10'sub - older') > $cdir/usr/concha/complete/zver
+writeln('complete 1'#10'sub - gamma') > $cfiles/zzcmd
+mkdir -p $cdir/jobs
+touch $cdir/jobs/alpha $cdir/jobs/beta $cdir/jobs/.hidden $cdir/jobs/-x
+setenv('ZZJOBS', cdir + '/jobs')
+cd $cdir
+check('file: subs and files', completions('tlo s'), ['sfile', 'start', 'stop', 'sub/'])
+check('file: options', completions('tlo -'), ['--help', '-h'])
+check('file: options of a sub', completions('tlo start -'), ['--bar', '-b'])
+check('file: word', completions('tlo start -b '), [])
+check('file: word operand', completions('tlo start s'), [])
+check('file: command', 'echo' in completions('tlo start x ech'), true)
+check('file: command arguments', completions('tlo start x echo sf'), ['sfile'])
+check('file: command with a file', completions('tlo start x tlo st'), ['start', 'stop'])
+check('file: command with a file, deeper', completions('tlo start x tlo start -'), ['--bar', '-b'])
+check('file: in', completions('tlo log '), ['-x', 'alpha', 'beta'])
+check('file: in hidden', completions('tlo log .'), ['.hidden'])
+check('file: in braces', completions('tlo stop a'), ['alpha'])
+check('file: in missing', completions('tlo rm '), [])
+check('file: in unset', completions('tlo bar '), [])
+check('file: dir', completions('tlo ls '), ['Downloads/', 'bin/', 'data/', 'jobs/', 'sub/', 'usr/'])
+check('file: one', completions('tlo log -n 1'), ['10', '100', '1000'])
+check('file: --name=', completions('tlo log --lines=10'), ['--lines=10', '--lines=100', '--lines=1000'])
+check('file: grouped flags', completions('tlo log -fn 10'), ['10', '100', '1000'])
+check('file: value taken', completions('tlo log -fn 10 a'), ['alpha'])
+check('file: --name= taken', completions('tlo log --lines=10 b'), ['beta'])
+check('file: options before --', completions('tlo log -'), ['--follow', '--lines', '-f', '-n'])
+check('file: after --', completions('tlo log -- -'), ['-x'])
+check('file: two deep', completions('zgit remote a'), ['add'])
+check('file: two deep one', completions('zgit remote add '), ['origin', 'upstream'])
+check('file: two deep option', completions('zgit remote add -t x o'), ['origin'])
+check('file: two deep options', completions('zgit remote add -'), ['--track', '-t'])
+check('file: two deep word', completions('zgit remote add origin '), [])
+check('file: malformed and unknown skipped', completions('zgit -'), ['--out', '-o'])
+check('file: file', completions('zgit -o sf'), ['sfile'])
+check('file: file after --out=', completions('zgit --out=sf'), ['--out=sfile'])
+check('file: unknown kind is file', completions('zgit commit sf'), ['sfile'])
+check('file: escapes and comment', completions('zgit commit x '), ['a b', 'c#d'])
+check('file: extra fields', completions('zgit commit x y '), [])
+check('file: unknown version', completions('zver o'), ['older'])
+check('file: by last component', completions('/no/where/zver ol'), ['older'])
+check('file: complete answers first', completions('zzcmd al'), ['albino', 'alpha'])
+check('file: complete answers alone', completions('zzcmd g'), [])
+cd - > /dev/null
+rm -r $cdir
+
+if failed = 0 then begin writeln(checked, ' tests passed'); halt(0) end
+else begin writeln(failed, ' of ', checked, ' tests failed'); halt(1) end

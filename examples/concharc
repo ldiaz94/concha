@@ -1,0 +1,206 @@
+{ concharc -- a starting ~/.concharc, as a tour of the prompt.
+
+  Copy it:  cp concharc ~/.concharc
+  The interactive shell runs ~/.concharc before its first prompt.  It
+  is an ordinary concha script: whatever it defines stays defined. }
+
+{ ---- environment ----
+
+  export puts a variable in the environment of every command started
+  from now on.  A plain assignment would stay inside the shell. }
+export EDITOR := 'vi'
+export PAGER := 'less'
+
+{ ---- version control in the prompt ----
+
+  Inside a git or sauce working tree, the prompt shows how much has
+  changed since the last commit: '2f +10 -3' is two files, ten lines
+  added and three removed.  New files count too, every line added,
+  though git diff leaves out the ones git does not track yet.  Nothing
+  is shown in a clean tree or outside one.
+
+  Finding the repository means climbing from PWD to /, looking for
+  .git or .sauce.  That costs no processes, and the answer is kept in
+  globals until PWD changes, so an ordinary prompt outside a
+  repository starts nothing at all.  Inside one, the diff itself runs
+  every time: the tree may have changed since the last prompt.
+
+  In a git tree the prompt also names the branch checked out, read
+  from .git/HEAD, so that costs no process either. }
+var vcsDir := '', vcsKind := '', vcsRoot := '';
+
+{ set vcsKind to 'git', 'sauce' or '' for PWD, and vcsRoot to the top
+  of the tree, climbing at most once per directory }
+procedure findvcs;
+var d;
+begin
+  if PWD = vcsDir then exit;
+  vcsDir := PWD;
+  vcsKind := '';
+  vcsRoot := '';
+  d := PWD;
+  while vcsKind = '' do begin
+    { .git is a file in a worktree or submodule, so test exists }
+    if exists(d + '/.git') then vcsKind := 'git'
+    else if isdir(d + '/.sauce') then vcsKind := 'sauce'
+    else if (d = '/') or (d = '') then exit
+    else begin
+      { drop the last component: /a/b becomes /a, /a becomes / }
+      while (length(d) > 1) and (copy(d, length(d), 1) <> '/') do
+        d := copy(d, 1, length(d) - 1);
+      if length(d) > 1 then d := copy(d, 1, length(d) - 1)
+      else if d <> '/' then d := ''
+    end
+  end;
+  vcsRoot := d
+end;
+
+{ '2f +10 -3' for the working tree against HEAD, or '' }
+function churn;
+var l, f, files, add, del, hunk;
+begin
+  result := '';
+  findvcs;
+  files := 0; add := 0; del := 0;
+  if vcsKind = 'git' then begin
+    { one line per file: added, removed, path; '-' for a binary file }
+    for l in lines(`git diff --numstat HEAD 2>/dev/null`) do begin
+      f := split(l, #9);
+      inc(files);
+      if f[0] <> '-' then begin
+        add := add + int(f[0]);
+        del := del + int(f[1])
+      end
+    end;
+    { untracked files, not ignored, from the top of the tree (:/):
+      grep prints how many lines each has, 0 for a binary }
+    for l in lines(`git ls-files -oz --exclude-standard :/ 2>/dev/null |
+        xargs -0r grep -chI ''`) do begin
+      inc(files);
+      add := add + int(l)
+    end
+  end
+  else if vcsKind = 'sauce' then begin
+    { a patch: count + and - lines inside hunks only, so the ---
+      and +++ header lines are never mistaken for changes }
+    hunk := false;
+    for l in lines(`sauce diff 2>/dev/null`) do
+      if copy(l, 1, 5) = 'diff ' then begin inc(files); hunk := false end
+      else if copy(l, 1, 2) = '@@' then hunk := true
+      else if hunk and (copy(l, 1, 1) = '+') then inc(add)
+      else if hunk and (copy(l, 1, 1) = '-') then inc(del)
+  end;
+  if files > 0 then
+    result := yellow + str(files) + 'f ' + green + '+' + str(add) + ' ' +
+      red + '-' + str(del) + reset + ' '
+end;
+
+{ ' main' for the git branch checked out, the commit's first seven
+  digits when HEAD is detached, or '' }
+function branch;
+var g, h;
+begin
+  result := '';
+  findvcs;
+  if vcsKind <> 'git' then exit;
+  g := vcsRoot + '/.git';
+  { in a worktree or submodule, .git is a file naming the real one,
+    'gitdir: <path>', relative to the tree for a submodule }
+  if isfile(g) then begin
+    readln(h) < $g;
+    g := copy(h, 9, length(h));
+    if copy(g, 1, 1) <> '/' then g := vcsRoot + '/' + g
+  end;
+  if not isfile(g + '/HEAD') then exit;
+  readln(h) < "$g/HEAD";
+  if copy(h, 1, 16) = 'ref: refs/heads/' then
+    result := copy(h, 17, length(h))
+  else
+    result := copy(h, 1, 7);
+  result := ' ' + magenta + result + reset
+end;
+
+{ ---- the prompt ----
+
+  A procedure named prompt draws the prompt; whatever it writes is
+  the prompt.  red, green, blue, bold, reset and the other colour
+  names hold escape sequences, or '' when colour is off, so this also
+  works in a plain terminal.  The line editor finds where the prompt
+  ends by itself, so escapes don't upset it. }
+procedure prompt;
+var dir, st;
+begin
+  { the diff below runs commands, which would overwrite status }
+  st := status;
+  dir := PWD;
+  { show the home directory as ~ }
+  if copy(dir, 1, length(HOME)) = HOME then
+    dir := '~' + copy(dir, length(HOME) + 1, length(dir));
+  { the last command's status, in red, only when it failed }
+  if st <> 0 then write(red, st, reset, ' ');
+  write(churn(), bold, blue, dir, reset, branch(), ' > ');
+  status := st
+end;
+
+{ ---- completion ----
+
+  Tab asks a function named complete about the arguments of every
+  command.  words holds the command's words up to the cursor, the last
+  being the one to complete; the answer is a list, or a string of
+  lines, of what that word might become.  Tab offers those that fit.
+  An empty answer leaves Tab to complete file names as usual.  Its
+  output goes nowhere, so a failing git outside a repository is quiet. }
+function complete(words);
+var n;
+begin
+  result := [];
+  n := length(words);
+  case words[0] of
+    'git', 'g':
+      if n = 2 then
+        result := ['add', 'branch', 'checkout', 'commit', 'diff', 'log',
+          'merge', 'pull', 'push', 'rebase', 'reset', 'restore', 'show',
+          'stash', 'status', 'switch']
+      else if (words[1] = 'checkout') or (words[1] = 'switch') or
+          (words[1] = 'merge') or (words[1] = 'rebase') then
+        result := `git branch -a --format='%(refname:short)'`;
+    'make':
+      { the targets in the Makefile here }
+      result := `grep -o '^[a-z][^:$=]*:' Makefile | tr -d :`;
+    'ssh', 'scp':
+      if n = 2 then
+        result := `grep -i '^host ' $HOME/.ssh/config | tr ' ' '\n' |
+          grep -iv '^host$' | grep -v '[*?]'`;
+    'pass':
+      { entries in the password store, without .gpg }
+      if n >= 2 then
+        result := `cd $HOME/.password-store && find . -name '*.gpg' |
+          sed 's|^\./||; s|\.gpg$||'`
+  end
+end;
+
+{ ---- aliases are procedures ----
+
+  args holds every argument, so $args passes them all on.  Called as
+  commands: ll /etc, la, g status. }
+procedure ll; begin ls -l $args end;
+procedure la; begin ls -la $args end;
+procedure g; begin git $args end;
+
+{ A procedure runs inside the shell, so its cd sticks: mkcd makes a
+  directory and goes there.  && stops at a failed mkdir. }
+procedure mkcd(dir);
+begin
+  mkdir -p $dir && cd $dir
+end;
+
+{ ---- functions for $(...) ----
+
+  up(n) is '../' n times: cd $(up(3)) climbs three levels. }
+function up(n);
+var s, i;
+begin
+  s := '';
+  for i := 1 to n do s := s + '../';
+  result := s
+end;

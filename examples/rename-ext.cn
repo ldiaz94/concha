@@ -1,0 +1,47 @@
+#!/usr/bin/env concha
+{ rename-ext.cn -- change the extension of every matching file in a
+  directory.
+
+  Run:    concha rename-ext.cn [-n] txt md [dir]
+          -n only shows what would be renamed; dir defaults to '.'.
+  Shows:  glob, copy on strings and lists, status after a command,
+          and continue. }
+
+procedure usage;
+begin
+  echo 'usage: rename-ext.cn [-n] old-ext new-ext [dir]' >&2;
+  halt(2)
+end;
+
+a := args;
+dry := false;
+if (length(a) > 0) and (a[0] = '-n') then begin
+  dry := true;
+  a := copy(a, 1)                    { lists index from 0: drop the first }
+end;
+if (length(a) < 2) or (length(a) > 3) then usage;
+old := a[0]; new := a[1];
+dir := '.';
+if length(a) = 3 then dir := a[2];
+
+failed := 0;
+{ glob returns a list, empty when nothing matches }
+for f in glob(dir + '/*.' + old) do begin
+  { strings index from 1: keep all but the old extension }
+  g := copy(f, 1, length(f) - length(old)) + new;
+  if exists(g) then begin
+    writeln('skipping ', f, ': ', g, ' exists');
+    continue
+  end;
+  if dry then writeln(f, ' -> ', g)
+  else begin
+    mv -- $f $g                      // one argument each, spaces and all;
+                                     // in a command, braces are not comments
+    if status <> 0 then inc(failed)
+  end
+end;
+
+if failed > 0 then begin
+  writeln(failed, ' file(s) could not be renamed');
+  halt(1)
+end
