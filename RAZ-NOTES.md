@@ -25,3 +25,16 @@ what was wanted, what concha does instead, and how much it cost.
 - **`Sys.wait` always reports a stopped child** (`WUNTRACED`), so
   concha's `wait` builtin, which waits for a job to end, has its own
   `Ckern.wait` with the options as `wait4` takes them.
+
+## The language
+
+- **A slice's pointer can't be had.** The report gives a slice's
+  layout, `ptr` and `len`, but only `LEN` reaches it; `ADR(s[0])` is
+  the pointer, and fails its check when `s` is empty. `Ccore` keeps a
+  value as a kind, a length and a pointer, as the Pascal did, and each
+  place that makes one from a `Buf` or a `Vec` tests for the empty one
+  first (`bufVal`, `listVal`). A `PTR(s)`, `nil` for the empty slice,
+  would do.
+- **A conversion takes no selector.** `^Val(v.p)[0..n]` doesn't parse,
+  since `^T(x)` is a factor and not a designator; it takes a local
+  pointer first (`Ccore.items`).

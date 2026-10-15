@@ -1,0 +1,587 @@
+(* Ccore: memory, values, errors and raw output.
+
+   Three lifetimes, each with its allocator. A syntax tree is kept from
+   the heap and never freed, since procedures point into it (perm). A
+   temporary comes from an arena with marks, which the interpreter
+   takes at each statement and releases after it; temps is the arena as
+   an allocator, so that a Buf or a Vec grows in it. A variable's value
+   is kept from the heap (keep) and freed when the variable changes
+   (drop), so values are copied, never shared, and nothing needs a
+   collector.
+
+   An error is one of four ERRORs, passed on with try to whatever deals
+   with it: the REPL, the script runner, source, a hook. fail writes
+   the message as it is found, and answers Failed; in a forked child
+   it ends the child instead. Output is unbuffered, so that a fork
+   never copies text yet to be written. *)
+module Ccore;
+import Sys, Rt, Mem, Heap, Buf, Fmt, Str, Ckern, Vals := Vec(Val);
+
+const
+    Failed*: ERROR = "failed";
+    More*: ERROR = "more input wanted";
+    Stopped*: ERROR = "interrupted, or a job stopped";
+    ErrExit*: ERROR = "a command failed under errexit";
+
+    MaxI64* = 7FFFFFFFFFFFFFFFH;
+    MinI64* = -MaxI64 - 1;
+
+    ChunkSize = 10000H;    (* the arena's blocks, 64 KB unless one asks for more *)
+    DistMax = 64;    (* the longest name distance compares *)
+
+type
+    Kind* = (kNil, kBool, kInt, kStr, kList);
+
+    (* A value: n is the boolean (0 or 1), the integer, the length of the
+       string or the number of items in the list; p points at the bytes
+       or the items. The zero Val is nil. *)
+    Val* = record
+        kind*: Kind;
+        n*: I64;
+        p*: ^U8;
+    end;
+
+    (* Where a message says it was: the parser and the interpreter set
+       these as they go. *)
+    Where* = record
+        line*: INT;    (* 0 when no line is known *)
+        col*: INT;    (* the byte column of a syntax error, from 1; 0 for none *)
+        file*: []U8;    (* "" when typed, or given with -c *)
+    end;
+
+    (* How messages are written *)
+    Opts* = record
+        showLine*: BOOL;    (* a typed line's number too *)
+        showCol*: BOOL;    (* -n: the head is line:col *)
+        keepErr*: BOOL;    (* -q: warn keeps the message, for kept, and writes nothing *)
+        colour*: BOOL;    (* standard error is a terminal that takes colour *)
+        inChild*: BOOL;    (* forked: fail ends the process *)
+    end;
+
+    (* The arena's state at a mark *)
+    Mark* = record
+        c: ^Chunk;
+        used: INT;
+    end;
+
+    (* A block of the arena: this header, then size bytes, used of them
+       given out *)
+    Chunk = record
+        prev: ^Chunk;
+        size, used: INT;
+    end;
+
+var
+    whereAt: Where;
+    optsAt: Opts;
+    where*: ^Where;
+    opts*: ^Opts;
+    arena: ^Chunk;
+    tempAlloc: Mem.Allocator;
+    temps*: ^Mem.Allocator;
+    scratch: Buf.Buf;    (* text's *)
+    keptMsg: Buf.Buf;    (* the last message, with keepErr *)
+
+(* ------------------------------------------------------------ arena *)
+
+proc mark*: Mark;
+begin
+    if arena = nil then return {}; end;
+    return {c: arena, used: arena^.used};
+end;
+
+(* Every temporary since m forgotten, and its blocks given back. *)
+proc release*(m: Mark);
+var c: ^Chunk;
+begin
+    while (arena # nil) and (arena # m.c) do
+        c := arena;
+        arena := c^.prev;
+        Mem.free(Heap.heap, ^U8(c));
+    end;
+    if arena # nil then arena^.used := m.used; end;
+end;
+
+(* n bytes of the arena, aligned to 8, until the release of a mark
+   taken before. *)
+proc alloc*(n: INT): ^U8;
+var c: ^Chunk; size: INT; p: ^U8;
+begin
+    n := (n + 7) & ~7;
+    if (arena = nil) or (arena^.used + n > arena^.size) then
+        size := ChunkSize;
+        if n > size then size := n; end;
+        c := ^Chunk(Mem.alloc(Heap.heap, SIZE(Chunk) + size, 16));
+        if c = nil then Rt.stop("concha: out of memory\n"); end;
+        c^ := {prev: arena, size: size};
+        arena := c;
+    end;
+    p := ^U8(arena) + SIZE(Chunk) + arena^.used;
+    INC(arena^.used, n);
+    return p;
+end;
+
+(* temps's alloc: alloc's 8 bytes are as much alignment as concha's
+   values want *)
+proc tempsAlloc(_a: ^Mem.Allocator; size, align: INT): ^U8;
+begin
+    if align > 8 then Rt.stop("concha: temps can't align to more than 8\n"); end;
+    return alloc(size);
+end;
+
+(* nothing: the arena frees at a release *)
+proc tempsFree(_a: ^Mem.Allocator; _p: ^U8);
+begin
+end;
+
+(* s, copied to the heap for good: what a syntax tree holds. *)
+proc perm*(s: []U8): []U8;
+var c: []U8; ok: BOOL;
+begin
+    c, ok := Str.copy(Heap.heap, s);
+    if not ok then Rt.stop("concha: out of memory\n"); end;
+    return c;
+end;
+
+(* ----------------------------------------------------------- output *)
+
+(* s written whole to fd, unbuffered. *)
+proc put*(fd: INT; s: []U8);
+var k: INT;
+begin
+    while LEN(s) > 0 do
+        k := Sys.write(fd, s);
+        if k < 0 then
+            if k # -Ckern.errIntr then return; end;
+        else
+            s := s[k..LEN(s)];
+        end;
+    end;
+end;
+
+(* "concha: " on standard error, the start of every message; bold red
+   in colour. *)
+proc errHead*;
+begin
+    if optsAt.colour then put(2, "\x1b[1;31mconcha:\x1b[0m "); else put(2, "concha: "); end;
+end;
+
+(* The text of f with args, until the next call. *)
+proc text*(f: []U8; args: []Fmt.Arg): []U8;
+begin
+    Buf.reset(ADR(scratch));
+    Fmt.write(ADR(scratch), f, args);
+    return Buf.bytes(ADR(scratch));
+end;
+
+(* What strerror says, for the errors concha's callers meet; e is the
+   errno, positive. *)
+proc errText*(e: INT): []U8;
+begin
+    match e of
+    | Ckern.errNoEnt: return "no such file or directory";
+    | Ckern.errAcces: return "permission denied";
+    | Ckern.errNotDir: return "not a directory";
+    | Ckern.errIsDir: return "is a directory";
+    | Ckern.errLoop: return "too many symbolic links";
+    | Ckern.errNameTooLong: return "file name too long";
+    | Ckern.errExist: return "file exists";
+    | Ckern.errNoExec: return "exec format error";
+    | Ckern.errMFile: return "too many open files";
+    | Ckern.errIntr: return "interrupted system call";
+    | Ckern.errInval: return "invalid argument";
+    | Ckern.errPerm: return "operation not permitted";
+    | else: return text("error {}", [Fmt.int(e)]);
+    end;
+end;
+
+(* The message warn kept last, with keepErr. *)
+proc kept*: []U8;
+begin
+    return Buf.bytes(ADR(keptMsg));
+end;
+
+(* An error reported, and the work carried on: the head, the place,
+   what it concerns if anything, and msg. *)
+proc report(what: []U8; hasWhat: BOOL; msg: []U8);
+var n: [20]U8; k: INT;
+begin
+    if optsAt.keepErr then
+        Buf.reset(ADR(keptMsg));
+        if hasWhat then Buf.str(ADR(keptMsg), what); Buf.str(ADR(keptMsg), ": "); end;
+        Buf.str(ADR(keptMsg), msg);
+        return;
+    end;
+    errHead;
+    if (whereAt.line > 0) and ((LEN(whereAt.file) > 0) or optsAt.showLine) then
+        if LEN(whereAt.file) > 0 then put(2, whereAt.file); put(2, ":"); end;
+        n, k := Str.fromInt(whereAt.line);
+        put(2, n[0..k]);
+        if optsAt.showCol and (whereAt.col > 0) then
+            n, k := Str.fromInt(whereAt.col);
+            put(2, ":");
+            put(2, n[0..k]);
+        end;
+        put(2, ": ");
+    end;
+    if hasWhat then put(2, what); put(2, ": "); end;
+    put(2, msg);
+    put(2, "\n");
+end;
+
+proc warn*(msg: []U8);
+begin
+    report("", false, msg);
+end;
+
+(* warn, of what the message concerns: "what: msg". *)
+proc warnOn*(what, msg: []U8);
+begin
+    report(what, true, msg);
+end;
+
+(* An error: warned of, and Failed to pass on; in a forked child, the
+   end of it, with status 2. *)
+proc fail*(msg: []U8): ERROR;
+begin
+    warn(msg);
+    if optsAt.inChild then Sys.exit(2); end;
+    return Failed;
+end;
+
+proc failOn*(what, msg: []U8): ERROR;
+begin
+    warnOn(what, msg);
+    if optsAt.inChild then Sys.exit(2); end;
+    return Failed;
+end;
+
+(* ----------------------------------------------------------- values *)
+
+proc boolVal*(b: BOOL): Val;
+begin
+    if b then return {kind: kBool, n: 1}; end;
+    return {kind: kBool};
+end;
+
+proc intVal*(i: I64): Val;
+begin
+    return {kind: kInt, n: i};
+end;
+
+(* s, copied to the arena. *)
+proc strVal*(s: []U8): Val;
+var p: ^U8;
+begin
+    p := alloc(LEN(s));
+    COPY(p[0..LEN(s)], s);
+    return {kind: kStr, n: LEN(s), p: p};
+end;
+
+(* The list of v's items, which stay where they are. *)
+proc listVal*(v: ^Vals.Vec): Val;
+var a: []Val;
+begin
+    a := Vals.all(v);
+    if LEN(a) = 0 then return {kind: kList}; end;
+    return {kind: kList, n: LEN(a), p: ^U8(ADR(a[0]))};
+end;
+
+(* A string's bytes, where they are. *)
+proc bytes*(v: Val): []U8;
+begin
+    return v.p[0..v.n];
+end;
+
+(* A list's items, where they are. *)
+proc items*(v: Val): []Val;
+var p: ^Val;
+begin
+    p := ^Val(v.p);
+    return p[0..v.n];
+end;
+
+(* A copy of v on the heap, items and all, for a variable to own. *)
+proc keep*(v: Val): Val;
+var k: Val; s, d: []Val; i: INT;
+begin
+    k := v;
+    match v.kind of
+    | kStr:
+        k.p := Mem.alloc(Heap.heap, INT(v.n) + 1, 1);
+        COPY(k.p[0..v.n], bytes(v));
+    | kList:
+        k.p := Mem.alloc(Heap.heap, INT(v.n) * SIZE(Val) + 1, 8);
+        s := items(v);
+        d := items(k);
+        for i := 0 to LEN(s) - 1 do d[i] := keep(s[i]); end;
+    | else:
+    end;
+    if (v.kind >= kStr) and (k.p = nil) then Rt.stop("concha: out of memory\n"); end;
+    return k;
+end;
+
+(* What keep made given back; v is nil after. *)
+proc drop*(var v: Val);
+var s: []Val; i: INT;
+begin
+    if v.kind = kList then
+        s := items(v);
+        for i := 0 to LEN(s) - 1 do drop(s[i]); end;
+    end;
+    if v.kind >= kStr then Mem.free(Heap.heap, v.p); end;
+    v := {};
+end;
+
+(* A copy of v in the arena, items and all: what reading a variable
+   gives, so that a later assignment in the same expression frees
+   nothing still in use. *)
+proc temp*(v: Val): Val;
+var t: Val; s, d: []Val; i: INT;
+begin
+    t := v;
+    match v.kind of
+    | kStr: t := strVal(bytes(v));
+    | kList:
+        t.p := alloc(INT(v.n) * SIZE(Val));
+        s := items(v);
+        d := items(t);
+        for i := 0 to LEN(s) - 1 do d[i] := temp(s[i]); end;
+    | else:
+    end;
+    return t;
+end;
+
+(* v as text, added to b: a list's items with spaces between. *)
+proc strInto(b: ^Buf.Buf; v: Val);
+var s: []Val; i: INT;
+begin
+    match v.kind of
+    | kNil:
+    | kBool: if v.n # 0 then Buf.str(b, "true"); else Buf.str(b, "false"); end;
+    | kInt: Fmt.write(b, "{}", [Fmt.int(v.n)]);
+    | kStr: Buf.str(b, bytes(v));
+    | kList:
+        s := items(v);
+        for i := 0 to LEN(s) - 1 do
+            if i > 0 then Buf.add(b, ' '); end;
+            strInto(b, s[i]);
+        end;
+    end;
+end;
+
+(* The string in the arena that the buffer b, grown in temps, holds. *)
+proc bufVal*(b: ^Buf.Buf): Val;
+var s: []U8;
+begin
+    s := Buf.bytes(b);
+    if LEN(s) = 0 then return {kind: kStr}; end;
+    return {kind: kStr, n: LEN(s), p: ADR(s[0])};
+end;
+
+(* v as a string. *)
+proc toStr*(v: Val): Val;
+var b: Buf.Buf;
+begin
+    if v.kind = kStr then return v; end;
+    Buf.init(ADR(b), temps);
+    strInto(ADR(b), v);
+    return bufVal(ADR(b));
+end;
+
+proc isSpace(c: U8): BOOL;
+begin
+    return (c = ' ') or (c = '\t') or (c = '\n');
+end;
+
+(* An integer, or a string that is one, blanks around it allowed: 1 and
+   the number; 0 if it isn't one; 2 if it is all digits but too big. *)
+proc digits(v: Val): (I64, INT);
+const Lim = 8000000000000000H;    (* -MinI64 *)
+var s: []U8; k, e: INT; d, u: U64; neg, big: BOOL;
+begin
+    if v.kind = kInt then return v.n, 1; end;
+    if v.kind # kStr then return 0, 0; end;
+    s := bytes(v);
+    k := 0;
+    e := LEN(s);
+    while (k < e) and isSpace(s[k]) do INC(k); end;
+    while (e > k) and isSpace(s[e - 1]) do DEC(e); end;
+    if (k < e) and ((s[k] = '-') or (s[k] = '+')) then neg := s[k] = '-'; INC(k); end;
+    if k >= e then return 0, 0; end;
+    while k < e do
+        if (s[k] < '0') or (s[k] > '9') then return 0, 0; end;
+        d := U64(s[k] - '0');
+        if u > (Lim - d) div 10 then big := true; else u := u * 10 + d; end;
+        INC(k);
+    end;
+    if big or (not neg and (u = Lim)) then return 0, 2; end;
+    if neg then return -I64(u), 1; end;
+    return I64(u), 1;
+end;
+
+(* v as a number, if it is one. *)
+proc isNum*(v: Val): (I64, BOOL);
+var i: I64; r: INT;
+begin
+    i, r := digits(v);
+    return i, r = 1;
+end;
+
+proc kindName*(k: Kind): []U8;
+begin
+    match k of
+    | kNil: return "nil";
+    | kBool: return "boolean";
+    | kInt: return "integer";
+    | kStr: return "string";
+    | kList: return "list";
+    end;
+end;
+
+(* v as a number, or an error. *)
+proc toInt*(v: Val): (I64, ERROR);
+var i: I64; r: INT;
+begin
+    i, r := digits(v);
+    if r = 1 then return i, nil; end;
+    if r = 2 then return 0, failOn(bytes(v), "integer overflow"); end;
+    if v.kind = kStr then return 0, failOn(bytes(v), "not a number"); end;
+    return 0, fail(text("expected a number, got {}", [Fmt.str(kindName(v.kind))]));
+end;
+
+(* ------------------------------------------- arithmetic, checked *)
+
+proc overflow*: ERROR;
+begin
+    return fail("integer overflow");
+end;
+
+proc intAdd*(a, b: I64): (I64, ERROR);
+begin
+    if (b > 0) and (a > MaxI64 - b) or (b < 0) and (a < MinI64 - b) then return 0, overflow(); end;
+    return a + b, nil;
+end;
+
+proc intSub*(a, b: I64): (I64, ERROR);
+begin
+    if (b < 0) and (a > MaxI64 + b) or (b > 0) and (a < MinI64 + b) then return 0, overflow(); end;
+    return a - b, nil;
+end;
+
+proc intMul*(a, b: I64): (I64, ERROR);
+var r: I64;
+begin
+    if (a = 0) or (b = 0) then return 0, nil; end;
+    if (a = -1) and (b = MinI64) or (b = -1) and (a = MinI64) then return 0, overflow(); end;
+    r := a * b;
+    if r div b # a then return 0, overflow(); end;
+    return r, nil;
+end;
+
+proc intNeg*(a: I64): (I64, ERROR);
+begin
+    if a = MinI64 then return 0, overflow(); end;
+    return -a, nil;
+end;
+
+(* v as a condition, which only a boolean is. *)
+proc truth*(v: Val): (BOOL, ERROR);
+begin
+    if v.kind # kBool then
+        return false, fail(text("expected a boolean, got {}", [Fmt.str(kindName(v.kind))]));
+    end;
+    return v.n # 0, nil;
+end;
+
+(* a = b, as concha's = compares: a number and a string of it are the
+   same, and so are nil and the empty string. *)
+proc same*(a, b: Val): BOOL;
+var i, j: I64; ia, ib: BOOL; x, y: []Val; k: INT;
+begin
+    if a.kind = b.kind then
+        match a.kind of
+        | kNil: return true;
+        | kBool, kInt: return a.n = b.n;
+        | kStr: return bytes(a) = bytes(b);
+        | kList:
+            if a.n # b.n then return false; end;
+            x := items(a);
+            y := items(b);
+            for k := 0 to LEN(x) - 1 do
+                if not same(x[k], y[k]) then return false; end;
+            end;
+            return true;
+        end;
+    end;
+    if ((a.kind = kInt) or (a.kind = kStr)) and ((b.kind = kInt) or (b.kind = kStr)) then
+        i, ia := isNum(a);
+        j, ib := isNum(b);
+        return ia and ib and (i = j);
+    end;
+    if (a.kind = kNil) and (b.kind = kStr) then return b.n = 0; end;
+    if (b.kind = kNil) and (a.kind = kStr) then return a.n = 0; end;
+    return false;
+end;
+
+(* ---------------------------------------------------------- strings *)
+
+proc min(a, b: INT): INT;
+begin
+    if a < b then return a; end;
+    return b;
+end;
+
+(* Optimal string alignment: Levenshtein's distance, plus swapping two
+   neighbouring letters, so that lenght is 1 from length. Three rows
+   (i - 2, i - 1, i); a name longer than DistMax is far from all. *)
+proc distance*(a, b: []U8): INT;
+var r0, r1, r2: [DistMax + 1]INT; i, j, cost, best: INT;
+begin
+    if (LEN(a) > DistMax) or (LEN(b) > DistMax) then return 3FFFFFFFH; end;
+    for j := 0 to LEN(b) do r1[j] := j; end;
+    for i := 1 to LEN(a) do
+        r2[0] := i;
+        for j := 1 to LEN(b) do
+            cost := 1;
+            if a[i - 1] = b[j - 1] then cost := 0; end;
+            best := min(r1[j] + 1, r2[j - 1] + 1);    (* delete, insert *)
+            best := min(best, r1[j - 1] + cost);    (* substitute *)
+            if (i > 1) and (j > 1) and (a[i - 1] = b[j - 2]) and (a[i - 2] = b[j - 1]) then
+                best := min(best, r0[j - 2] + 1);    (* transpose *)
+            end;
+            r2[j] := best;
+        end;
+        r0 := r1;
+        r1 := r2;
+    end;
+    return r1[LEN(b)];
+end;
+
+(* The file at path added to b: 0, or minus an errno. *)
+proc readFile*(path: []U8; b: ^Buf.Buf): INT;
+var fd, k: INT; s: []U8;
+begin
+    fd := Sys.openRead(path);
+    if fd < 0 then return fd; end;
+    defer Sys.close(fd);
+    while true do
+        s := Buf.spare(b, 10000H);
+        k := Sys.read(fd, s);
+        if k = 0 then break; end;
+        if k > 0 then INC(b^.len, k);
+        elsif k # -Ckern.errIntr then return k;
+        end;
+    end;
+    return 0;
+end;
+
+begin
+    where := ADR(whereAt);
+    opts := ADR(optsAt);
+    optsAt.showLine := true;
+    tempAlloc := {alloc: tempsAlloc, free: tempsFree};
+    temps := ADR(tempAlloc);
+    Buf.init(ADR(scratch), Heap.heap);
+    Buf.init(ADR(keptMsg), Heap.heap);
+end Ccore.

@@ -13,7 +13,7 @@ before it is started, not after.
       with its options). Of `kern.pas`, what `Sys` has (the terminal's
       size and owner, `setpgid`, `chdir`, `getcwd`, the time) is
       `Sys`'s.
-- [ ] 2. `Ccore`: the arena, values, errors, output, files, the
+- [x] 2. `Ccore`: the arena, values, errors, output, files, the
       distance between two names.
 - [ ] 3. `Csyntax`: scanner, parser, syntax tree, and the notes the
       queries read (`-q outline`, `words`, `def`).
