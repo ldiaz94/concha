@@ -1,0 +1,129 @@
+(* Cclock: an instant as text, for time(): a small strftime.
+
+   The date is the local clock's, its offset and abbreviation at the
+   instant from Czone. Days are counted from 1970-01-01 and made a
+   civil date after Howard Hinnant's days_from_civil: years start in
+   March, so the leap day falls last, and eras of 400 years repeat
+   exactly. Instants before 1970 count too.
+
+   Depends on Ccore for the arena and errors, and on Czone for the
+   zone. Left out: the locale; names are English. *)
+module Cclock;
+import Buf, Str, Fmt, Ccore, Czone;
+
+const
+    DayNames: [][]U8 = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    MonthNames: [][]U8 = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+        "November", "December"
+    ];
+
+(* x div y, rounded down rather than toward zero. *)
+proc floorDiv(x, y: I64): I64;
+var q: I64;
+begin
+    q := x div y;
+    if (x mod y # 0) and ((x < 0) # (y < 0)) then DEC(q); end;
+    return q;
+end;
+
+(* The year, month and day of the day days after 1970-01-01. *)
+proc civilDate(days: I64): (I64, I64, I64);
+var era, doe, yoe, doy, mp, y, m, d: I64;
+begin
+    days := days + 719468;
+    era := floorDiv(days, 146097);
+    doe := days - era * 146097;
+    yoe := (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365;
+    doy := doe - (365 * yoe + yoe div 4 - yoe div 100);
+    mp := (5 * doy + 2) div 153;
+    d := doy - (153 * mp + 2) div 5 + 1;
+    if mp < 10 then m := mp + 3; else m := mp - 9; end;
+    y := yoe + era * 400;
+    if m <= 2 then INC(y); end;
+    return y, m, d;
+end;
+
+(* v in decimal added to b, at least w digits wide, padded with pad. *)
+proc num(b: ^Buf.Buf; v: I64; w: INT; pad: U8);
+var d: [20]U8; k: INT;
+begin
+    d, k := Str.fromInt(v);
+    while w > k do
+        Buf.add(b, pad);
+        DEC(w);
+    end;
+    Buf.str(b, d[0..k]);
+end;
+
+(* fmt with the instant ms, milliseconds since 1970, in the local time
+   zone, in the arena. *)
+proc format*(fmt: []U8; ms: I64): ([]U8, ERROR);
+var b: Buf.Buf; abbr: []U8; secs, t, days, sod, y, m, d, off: I64; i, wd, zoff: INT; c: U8;
+begin
+    secs := floorDiv(ms, 1000);
+    zoff, abbr := Czone.at(secs);
+    t := secs + zoff;
+    days := floorDiv(t, 86400);
+    sod := t - days * 86400;
+    y, m, d := civilDate(days);
+    wd := INT(days + 4 - floorDiv(days + 4, 7) * 7);    (* 1970-01-01 was a Thursday *)
+    Buf.init(ADR(b), Ccore.temps);
+    i := 0;
+    while i < LEN(fmt) do
+        c := fmt[i];
+        INC(i);
+        if c # '%' then
+            Buf.add(ADR(b), c);
+            continue;
+        end;
+        if i = LEN(fmt) then return "", Ccore.fail("time format ends in %"); end;
+        c := fmt[i];
+        INC(i);
+        match c of
+        | 'Y': num(ADR(b), y, 4, '0');
+        | 'y': num(ADR(b), y mod 100, 2, '0');
+        | 'm': num(ADR(b), m, 2, '0');
+        | 'd': num(ADR(b), d, 2, '0');
+        | 'e': num(ADR(b), d, 2, ' ');
+        | 'H': num(ADR(b), sod div 3600, 2, '0');
+        | 'M': num(ADR(b), sod div 60 mod 60, 2, '0');
+        | 'S': num(ADR(b), sod mod 60, 2, '0');
+        | 'a': Buf.str(ADR(b), DayNames[wd][0..3]);
+        | 'A': Buf.str(ADR(b), DayNames[wd]);
+        | 'b': Buf.str(ADR(b), MonthNames[m - 1][0..3]);
+        | 'B': Buf.str(ADR(b), MonthNames[m - 1]);
+        | 's': num(ADR(b), secs, 1, '0');
+        | 'z':
+            off := zoff div 60;
+            if off < 0 then
+                Buf.add(ADR(b), '-');
+                off := -off;
+            else
+                Buf.add(ADR(b), '+');
+            end;
+            num(ADR(b), off div 60, 2, '0');
+            num(ADR(b), off mod 60, 2, '0');
+        | 'Z': Buf.str(ADR(b), abbr);
+        | 'F':
+            num(ADR(b), y, 4, '0');
+            Buf.add(ADR(b), '-');
+            num(ADR(b), m, 2, '0');
+            Buf.add(ADR(b), '-');
+            num(ADR(b), d, 2, '0');
+        | 'T', 'R':
+            num(ADR(b), sod div 3600, 2, '0');
+            Buf.add(ADR(b), ':');
+            num(ADR(b), sod div 60 mod 60, 2, '0');
+            if c = 'T' then
+                Buf.add(ADR(b), ':');
+                num(ADR(b), sod mod 60, 2, '0');
+            end;
+        | '%': Buf.add(ADR(b), '%');
+        | else: return "", Ccore.fail(Ccore.text("unknown time format %{}", [Fmt.char(c)]));
+        end;
+    end;
+    return Buf.bytes(ADR(b)), nil;
+end;
+
+end Cclock.

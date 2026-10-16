@@ -21,7 +21,7 @@
    suggestions for a command not found in 6d; until then a builtin
    answers that it is missing, and nothing is suggested. *)
 module Cinterp;
-import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
+import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
 
 const
     MaxSaves = 256;    (* fds saved around a builtin's redirections *)
@@ -29,6 +29,7 @@ const
     HereMax = 32768;    (* a here string the shell writes itself; a longer one, a child *)
 
     (* The signals trap takes: EXIT, which isn't one, and the rest *)
+    TrapNames: [][]U8 = ["EXIT", "HUP", "INT", "QUIT", "TERM", "USR1", "USR2"];
     TrapSigs: []INT = [0, Sys.sigHup, Sys.sigInt, Sys.sigQuit, Sys.sigTerm, Sys.sigUsr1, Sys.sigUsr2];
     NTrap = LEN(TrapSigs);
 
@@ -126,28 +127,22 @@ var
     intSeen: BOOL;    (* waitFor let a Ctrl-C pass *)
     keepFds: BOOL;    (* exec with no command: its redirections stay *)
     exempt: INT;    (* above 0, a failure doesn't trigger errexit *)
+    inPromptProc: BOOL;    (* the prompt procedure runs *)
     chainSkipped: BOOL;    (* the last pipeline of the chain didn't run *)
 
 proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
 proc execList(l: []^Csyntax.Stmt): ERROR; forward;
 proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
 proc runArgs(a: []Ccore.Val): (INT, ERROR); forward;
+proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
+proc runText*(text, path: []U8): ERROR; forward;
+proc reapJobs*; forward;
 
 (* ---------------------------------------------- not yet ported *)
 
 proc missing(what: []U8): ERROR;
 begin
     return Ccore.fail(Ccore.text("{} come with a later step of the port", [Fmt.str(what)]));
-end;
-
-proc builtin(_e: ^Csyntax.Expr): (Ccore.Val, ERROR);
-begin
-    return {}, missing("builtins");
-end;
-
-proc runCmdBuiltin(_bi: INT; _a: []Ccore.Val): (INT, ERROR);
-begin
-    return 0, missing("builtins");
 end;
 
 proc suggestCommand(_name: []U8): []U8;
@@ -1330,6 +1325,763 @@ begin
     | eCap: return capture(e^.cap);
     | eRange: return {}, nil;
     end;
+end;
+
+(* --------------------------------------------------------- builtins *)
+
+proc source(path: []U8): ERROR;
+var b: Buf.Buf; e: INT;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    e := Ccore.readFile(path, ADR(b));
+    if e < 0 then return Ccore.failOn(path, Ccore.text("cannot read: {}", [Fmt.str(Ccore.errText(-e))])); end;
+    try runText(Buf.bytes(ADR(b)), Ccore.perm(path));
+    if ctl = cExit then ctl := cNone; end;
+    return nil;
+end;
+
+(* source, run by the prompt procedure: an error in the file is shown
+   and gives status 1, and the prompt goes on. Unguarded, the error
+   would reach the REPL, which turns the prompt procedure off for good.
+   Any other error (Ctrl-C, errexit) is passed on. *)
+proc sourceGuarded(path: []U8): (INT, ERROR);
+var f: Cvars.Frame; up: ^Csyntax.Stmt; lvl, ns, ex: INT; err: ERROR;
+begin
+    lvl := nsave;
+    ns := nsub;
+    f := Cvars.here();
+    up := curFunc;
+    ex := exempt;
+    err := source(path);
+    if err = nil then return Cvars.status(), nil; end;
+    restoreFds(lvl);
+    closeSubs(ns);
+    Cvars.leave(f);
+    curFunc := up;
+    exempt := ex;
+    ctl := cNone;
+    tailOk := false;
+    keepFds := false;
+    if err # Ccore.Failed then return 0, err; end;
+    return 1, nil;
+end;
+
+(* errHead, then msg on standard error. *)
+proc complain(msg: []U8);
+begin
+    Ccore.errHead;
+    Ccore.put(2, msg);
+end;
+
+(* wait [pid ...]: the status of the last process reaped, 127 for a
+   pid that isn't a child of the shell's. *)
+proc waitJobs(a: []Ccore.Val): INT;
+var e: Ended; v: Ccore.Val; i: I64; r, target, k, j, pid: INT; ok: BOOL;
+begin
+    k := 1;
+    repeat
+        target := -1;
+        if LEN(a) > 1 then
+            v := Ccore.toStr(a[k]);
+            i, ok := Ccore.isNum(v);
+            if not ok or (i <= 0) then
+                complain(Ccore.text("wait: not a process id: {}\n", [Fmt.str(Ccore.bytes(v))]));
+                return 1;
+            end;
+            target := INT(i);
+        end;
+        while true do
+            pid, e.how, e.n := Sys.wait(target, true);
+            if pid < 0 then
+                if pid = -Ccore.errIntr then
+                    noteSignals;
+                    if not intr and not trapPending then continue; end;
+                end;
+                if pid = -Ccore.errChild then
+                    if target > 0 then r := 127; end;
+                else
+                    r := 128 + Sys.sigInt;
+                end;
+                break;
+            end;
+            if e.how # Sys.stopped then    (* the Pascal waited without WUNTRACED *)
+                j := reaped(pid, e);
+                if (j >= 0) and (Jobs.all(ADR(jobs))[j].left = 0) then dropJob(j); end;
+                r := exitCode(e);
+                if target > 0 then break; end;
+            end;
+        end;
+        INC(k);
+    until k >= LEN(a);
+    return r;
+end;
+
+(* The job fg, bg or disown (who) means: its number, with or without %,
+   or the current job; -1, having said why, if there is none. *)
+proc jobArg(a: []Ccore.Val; who: []U8): INT;
+var v, w: []U8; js: []Job; i: I64; k: INT; ok: BOOL;
+begin
+    js := Jobs.all(ADR(jobs));
+    if LEN(a) > 1 then
+        v := Ccore.bytes(Ccore.toStr(a[1]));
+        w := v;
+        if (LEN(v) > 0) and (v[0] = '%') then v := v[1..LEN(v)]; end;
+        i, ok := Ccore.isNum(Ccore.strVal(v));
+        if ok then
+            for k := 0 to LEN(js) - 1 do
+                if js[k].id = i then return k; end;
+            end;
+        end;
+        complain(Ccore.text("{}: no such job: {}\n", [Fmt.str(who), Fmt.str(w)]));
+        return -1;
+    end;
+    if LEN(js) = 0 then complain(Ccore.text("{}: no current job\n", [Fmt.str(who)])); end;
+    return LEN(js) - 1;
+end;
+
+(* jobs: a line each, the current job marked +. *)
+proc listJobs: INT;
+var js: []Job; b: Buf.Buf; k: INT;
+begin
+    if interactive then reapJobs; end;
+    js := Jobs.all(ADR(jobs));
+    Buf.init(ADR(b), Ccore.temps);
+    for k := 0 to LEN(js) - 1 do
+        Buf.reset(ADR(b));
+        Fmt.write(ADR(b), "[{}]", [Fmt.int(js[k].id)]);
+        if k = LEN(js) - 1 then Buf.str(ADR(b), "+ "); else Buf.str(ADR(b), "  "); end;
+        Fmt.write(ADR(b), "{}", [Fmt.int(js[k].pgid)]);
+        if js[k].stopped then Buf.str(ADR(b), " stopped "); else Buf.str(ADR(b), " running "); end;
+        Buf.str(ADR(b), js[k].name);
+        Buf.add(ADR(b), '\n');
+        Ccore.put(1, Buf.bytes(ADR(b)));
+    end;
+    return 0;
+end;
+
+(* fg [job]: a job continued in the foreground, and waited for. *)
+proc fgJob(a: []Ccore.Val): (INT, ERROR);
+var j: ^Job; k: INT;
+begin
+    if not jc then
+        complain("fg: no job control\n");
+        return 1, nil;
+    end;
+    k := jobArg(a, "fg");
+    if k < 0 then return 1, nil; end;
+    j := ADR(Jobs.all(ADR(jobs))[k]);
+    Ccore.put(2, Ccore.text("{}\n", [Fmt.str(j^.name)]));
+    giveTerm(j^.pgid);
+    if j^.stopped then
+        if j^.hasTio then _ := Sys.setMode(0, j^.tio); end;
+        j^.stopped := false;
+        _ := Sys.kill(-j^.pgid, Sys.sigCont);
+    end;
+    return waitJob(k);
+end;
+
+(* bg [job]: a stopped job continued in the background. *)
+proc bgJob(a: []Ccore.Val): INT;
+var j: ^Job; k: INT;
+begin
+    k := jobArg(a, "bg");
+    if k < 0 then return 1; end;
+    j := ADR(Jobs.all(ADR(jobs))[k]);
+    if j^.stopped then
+        j^.stopped := false;
+        _ := Sys.kill(-j^.pgid, Sys.sigCont);
+        report(k, "running");
+    end;
+    return 0;
+end;
+
+(* disown [job]: a job forgotten, so that the hangup passes it by; a
+   stopped one is continued first, with nobody left to do it later. *)
+proc disownJob(a: []Ccore.Val): INT;
+var k: INT;
+begin
+    k := jobArg(a, "disown");
+    if k < 0 then return 1; end;
+    if Jobs.all(ADR(jobs))[k].stopped then _ := Sys.kill(-Jobs.all(ADR(jobs))[k].pgid, Sys.sigCont); end;
+    dropJob(k);
+    return 0;
+end;
+
+(* ulimit's complaint, msg perhaps from Ccore.text: 1. *)
+proc badLimit(msg: []U8): INT;
+begin
+    complain("ulimit: ");
+    Ccore.put(2, msg);
+    Ccore.put(2, "\n");
+    return 1;
+end;
+
+(* ulimit [-c | -f | -n | -s | -t | -v] [value | unlimited]: a soft
+   limit shown or set, in kilobytes but for -n and -t. *)
+proc ulimit(a: []Ccore.Val): INT;
+var v: []U8; soft, hard, i: I64; which, scale, k, e: INT; ok: BOOL;
+begin
+    which := Sys.limitFileSize;
+    scale := 1024;
+    k := 1;
+    if LEN(a) > 1 then
+        v := Ccore.bytes(Ccore.toStr(a[1]));
+        if (LEN(v) = 2) and (v[0] = '-') then
+            match v[1] of
+            | 'c': which := Sys.limitCore;
+            | 'f': which := Sys.limitFileSize;
+            | 'n':
+                which := Sys.limitFiles;
+                scale := 1;
+            | 's': which := Sys.limitStack;
+            | 't':
+                which := Sys.limitCpu;
+                scale := 1;
+            | 'v': which := Sys.limitMemory;
+            | else: return badLimit(Ccore.text("unknown option {}", [Fmt.str(v)]));
+            end;
+            k := 2;
+        end;
+    end;
+    if LEN(a) > k + 1 then return badLimit("too many arguments"); end;
+    soft, hard, e := Sys.limit(which);
+    if e # 0 then return badLimit(Ccore.errText(-e)); end;
+    if LEN(a) = k then
+        if soft = -1 then
+            Ccore.put(1, "unlimited\n");
+        else
+            Ccore.put(1, Ccore.text("{}\n", [Fmt.int(soft div scale)]));
+        end;
+        return 0;
+    end;
+    v := Ccore.bytes(Ccore.toStr(a[k]));
+    if v = "unlimited" then
+        soft := -1;
+    else
+        i, ok := Ccore.isNum(Ccore.strVal(v));
+        if not ok or (i < 0) or (i > Ccore.MaxI64 div scale) then return badLimit(Ccore.text("not a limit: {}", [Fmt.str(v)])); end;
+        soft := i * scale;
+    end;
+    e := Sys.setLimit(which, soft, hard);
+    if e # 0 then return badLimit(Ccore.errText(-e)); end;
+    return 0;
+end;
+
+(* trap name|-|'' signal ...: a procedure for each signal, or it
+   ignored, or back to the shell's default. *)
+proc trap(a: []Ccore.Val): INT;
+var act, v: []U8; r, i, j, k: INT; ok: BOOL;
+begin
+    if LEN(a) < 3 then
+        complain("trap: usage: trap name|-|'' signal...\n");
+        return 1;
+    end;
+    act := Ccore.bytes(Ccore.toStr(a[1]));
+    for k := 2 to LEN(a) - 1 do
+        v := Ccore.bytes(Ccore.toStr(a[k]));
+        j := -1;
+        for i := 0 to NTrap - 1 do
+            if v = TrapNames[i] then j := i; end;
+        end;
+        if j < 0 then
+            complain(Ccore.text("trap: unknown signal {}\n", [Fmt.str(v)]));
+            r := 1;
+            continue;
+        end;
+        Str.free(Heap.heap, traps[j].name);
+        traps[j].name := "";
+        if LEN(act) = 0 then
+            traps[j].act := aIgnore;
+        elsif act = "-" then
+            traps[j].act := aDefault;
+        else
+            traps[j].act := aProc;
+            traps[j].name, ok := Str.copy(Heap.heap, act);
+            if not ok then Rt.stop("concha: out of memory\n"); end;
+        end;
+        if j > 0 then applySig(j); end;
+    end;
+    return r;
+end;
+
+(* cd [dir], cd -: PWD and OLDPWD kept. *)
+proc cd(a: []Ccore.Val): (INT, ERROR);
+var r: ^Cvars.Var; v, old: Ccore.Val; d: []U8; e: INT; toOld: BOOL;
+begin
+    toOld := (LEN(a) > 1) and (a[1].kind = Ccore.kStr) and (Ccore.bytes(a[1]) = "-");
+    if toOld then
+        r := Cvars.findGlobal("OLDPWD");
+        if r = nil then
+            complain("cd: OLDPWD not set\n");
+            return 1, nil;
+        end;
+        v := Ccore.toStr(r^.v);
+    elsif LEN(a) > 1 then
+        v := Ccore.toStr(a[1]);
+    else
+        v := Ccore.strVal(Cvars.home());
+    end;
+    old := Ccore.strVal(Cvars.str("PWD"));
+    e := Sys.setWorkDir(Ccore.bytes(v));
+    if e # 0 then
+        complain(Ccore.text("cd: {}: {}\n", [Fmt.str(Ccore.bytes(v)), Fmt.str(Ccore.errText(-e))]));
+        return 1, nil;
+    end;
+    r := Cvars.global("OLDPWD");
+    try Cvars.store(r, old);
+    r^.exported := true;
+    d, e := Sys.workDir();
+    if e = 0 then
+        try Cvars.store(Cvars.global("PWD"), Ccore.strVal(d));
+        if toOld then Ccore.put(1, Ccore.text("{}\n", [Fmt.str(d)])); end;
+    end;
+    return 0, nil;
+end;
+
+proc echo(a: []Ccore.Val);
+var b: Buf.Buf; i, k: INT; nl: BOOL;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    i := 1;
+    nl := true;
+    if (LEN(a) > 1) and (a[1].kind = Ccore.kStr) and (Ccore.bytes(a[1]) = "-n") then
+        nl := false;
+        i := 2;
+    end;
+    for k := i to LEN(a) - 1 do
+        if k > i then Buf.add(ADR(b), ' '); end;
+        Buf.str(ADR(b), Ccore.bytes(Ccore.toStr(a[k])));
+    end;
+    if nl then Buf.add(ADR(b), '\n'); end;
+    Ccore.put(1, Buf.bytes(ADR(b)));
+end;
+
+(* umask [mode]: the mask shown, in octal, or set. *)
+proc umask(a: []Ccore.Val): INT;
+var d: [4]U8; v: []U8; mask, k: INT;
+begin
+    if LEN(a) < 2 then
+        mask := Sys.umask(0);
+        _ := Sys.umask(mask);
+        for k := 3 to 0 by -1 do
+            d[k] := U8('0' + mask & 7);
+            mask := mask shr 3;
+        end;
+        Ccore.put(1, Ccore.text("{}\n", [Fmt.str(d)]));
+        return 0;
+    end;
+    v := Ccore.bytes(Ccore.toStr(a[1]));
+    for k := 0 to LEN(v) - 1 do
+        if (v[k] >= '0') and (v[k] <= '7') and (mask < 512) then
+            mask := mask * 8 + v[k] - '0';
+        else
+            mask := 4096;    (* 512, 4096 and 4095 are octal 1000, 10000 and 7777 *)
+        end;
+    end;
+    if (LEN(v) = 0) or (mask > 4095) then
+        complain(Ccore.text("umask: not an octal mode: {}\n", [Fmt.str(v)]));
+        return 1;
+    end;
+    _ := Sys.umask(mask);
+    return 0;
+end;
+
+(* The command builtin bi, from 1 as cmdBuiltin numbers them, run with
+   the words a: its status. *)
+proc runCmdBuiltin(bi: INT; a: []Ccore.Val): (INT, ERROR);
+var v: []U8; r, k: INT;
+begin
+    match Csyntax.CmdBuiltins[bi - 1].name of
+    | "cd": return cd(a);
+    | "echo": echo(a);
+    | "source":
+        if LEN(a) < 2 then return 0, Ccore.fail("source: missing file"); end;
+        v := Ccore.bytes(Ccore.toStr(a[1]));
+        if inPromptProc then return sourceGuarded(v); end;
+        try source(v);
+        return Cvars.status(), nil;
+    | "wait": return waitJobs(a), nil;
+    | "exec":
+        if LEN(a) = 1 then
+            keepFds := true;
+            return 0, nil;
+        end;
+        execSignals;
+        r := tryExec(a[1..LEN(a)]);
+        if not Ccore.opts^.inChild then onSignals; end;
+        return r, nil;
+    | "umask": return umask(a), nil;
+    | "unset":
+        for k := 1 to LEN(a) - 1 do
+            v := Ccore.bytes(Ccore.toStr(a[k]));
+            if LEN(v) > 0 then try Cvars.unset(v); end;
+        end;
+    | "ulimit": return ulimit(a), nil;
+    | "trap": return trap(a), nil;
+    | "jobs": return listJobs(), nil;
+    | "fg": return fgJob(a);
+    | "bg": return bgJob(a), nil;
+    | "disown": return disownJob(a), nil;
+    | else:
+    end;
+    return 0, nil;
+end;
+
+(* A builtin routine's arguments, between lo and hi of them. *)
+proc need(e: ^Csyntax.Expr; lo, hi: INT): (INT, ERROR);
+begin
+    if (LEN(e^.args) < lo) or (LEN(e^.args) > hi) then return 0, Ccore.failOn(e^.s, "wrong number of arguments"); end;
+    return LEN(e^.args), nil;
+end;
+
+proc argStr(e: ^Csyntax.Expr; i: INT): ([]U8, ERROR);
+begin
+    return Ccore.bytes(Ccore.toStr(try eval(e^.args[i]))), nil;
+end;
+
+(* The variable a builtin routine's first argument must be. *)
+proc lvar(e: ^Csyntax.Expr): (^Csyntax.Expr, ERROR);
+begin
+    if e^.args[0]^.kind # Csyntax.eVar then return nil, Ccore.failOn(e^.s, "needs a variable"); end;
+    return e^.args[0], nil;
+end;
+
+(* A line of standard input, without its line feed, read a byte at a
+   time so that nothing past it is taken; false at the end. *)
+proc readLine: (Ccore.Val, BOOL, ERROR);
+var b: Buf.Buf; c: [1]U8; k: INT; got: BOOL;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    while true do
+        k := Sys.read(0, c);
+        if k = -Ccore.errIntr then
+            noteSignals;
+            if intr then return {}, false, interrupted(); end;
+        elsif k <= 0 then
+            break;
+        else
+            got := true;
+            if c[0] = '\n' then break; end;
+            Buf.add(ADR(b), c[0]);
+        end;
+    end;
+    return Ccore.bufVal(ADR(b)), got, nil;
+end;
+
+proc isBlank(c: U8): BOOL;
+begin
+    return (c = ' ') or (c = '\t') or (c = '\n') or (c = '\r');
+end;
+
+(* s cut at each sep, or into its words if sep is empty: a list. *)
+proc split(s, sep: []U8): Ccore.Val;
+var out: Vals.Vec; i, j: INT;
+begin
+    Vals.init(ADR(out), Ccore.temps);
+    if LEN(sep) = 0 then
+        i := 0;
+        while true do
+            while (i < LEN(s)) and isBlank(s[i]) do INC(i); end;
+            if i >= LEN(s) then break; end;
+            j := i;
+            while (j < LEN(s)) and not isBlank(s[j]) do INC(j); end;
+            Vals.push(ADR(out), Ccore.strVal(s[i..j]));
+            i := j;
+        end;
+    elsif LEN(s) > 0 then
+        while true do
+            j := Str.find(s, sep);
+            if j < 0 then
+                Vals.push(ADR(out), Ccore.strVal(s));
+                break;
+            end;
+            Vals.push(ADR(out), Ccore.strVal(s[0..j]));
+            s := s[j + LEN(sep)..LEN(s)];
+        end;
+    end;
+    return Ccore.listVal(ADR(out));
+end;
+
+(* a sorted in place by compare, keeping equals in order: a merge sort,
+   bottom up. *)
+proc sortVals(a: []Ccore.Val): ERROR;
+var tmp: Vals.Vec; src, dst, t: []Ccore.Val; w, lo, mid, hi, l, r, k: INT;
+begin
+    Vals.init(ADR(tmp), Ccore.temps);
+    Vals.resize(ADR(tmp), LEN(a));
+    src := a;
+    dst := Vals.all(ADR(tmp));
+    w := 1;
+    while w < LEN(a) do
+        lo := 0;
+        while lo < LEN(a) do
+            mid := lo + w;
+            if mid > LEN(a) then mid := LEN(a); end;
+            hi := mid + w;
+            if hi > LEN(a) then hi := LEN(a); end;
+            l := lo;
+            r := mid;
+            for k := lo to hi - 1 do
+                if (l < mid) and ((r >= hi) or (try compare(src[l], src[r]) <= 0)) then
+                    dst[k] := src[l];
+                    INC(l);
+                else
+                    dst[k] := src[r];
+                    INC(r);
+                end;
+            end;
+            lo := hi;
+        end;
+        t := src;
+        src := dst;
+        dst := t;
+        w := w * 2;
+    end;
+    if LEN(a) > 0 then
+        if ADR(src[0]) # ADR(a[0]) then COPY(a, src); end;
+    end;
+    return nil;
+end;
+
+(* A name the environment can hold: not empty, no = and no NUL. *)
+proc envName(s: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(s) - 1 do
+        if (s[i] = '=') or (s[i] = 0) then return false; end;
+    end;
+    return LEN(s) > 0;
+end;
+
+(* copy(x, i[, n]): of a string, n bytes from the ith, from 1; of a
+   list, n items from the ith, from 0; cut to what there is. *)
+proc copyOf(e: ^Csyntax.Expr; n: INT): (Ccore.Val, ERROR);
+var a: Ccore.Val; i, k: I64;
+begin
+    a := try eval(e^.args[0]);
+    i := try Ccore.toInt(try eval(e^.args[1]));
+    k := 7FFFFFFFH;
+    if n = 3 then k := try Ccore.toInt(try eval(e^.args[2])); end;
+    if a.kind = Ccore.kStr then
+        DEC(i);
+    elsif a.kind # Ccore.kList then
+        a := Ccore.toStr(a);    (* from 0, as the Pascal had it *)
+    end;
+    if i < 0 then
+        k := k + i;
+        i := 0;
+    end;
+    if i > a.n then i := a.n; end;
+    if k > a.n - i then k := a.n - i; end;
+    if k < 0 then k := 0; end;
+    if a.kind = Ccore.kList then return listOf(Ccore.items(a)[i..i + k]), nil; end;
+    return Ccore.strVal(Ccore.bytes(a)[i..i + k]), nil;
+end;
+
+(* basename(p[, suffix]) and dirname(p), as POSIX has them: slashes at
+   the end don't count, and / stays /. *)
+proc pathPart(e: ^Csyntax.Expr; n: INT): (Ccore.Val, ERROR);
+var a, x: []U8; i, k: INT;
+begin
+    a := try argStr(e, 0);
+    k := LEN(a);
+    while (k > 1) and (a[k - 1] = '/') do DEC(k); end;
+    i := k;
+    while (i > 0) and (a[i - 1] # '/') do DEC(i); end;
+    if e^.bi = Csyntax.bDirname then
+        if i = 0 then return Ccore.strVal("."), nil; end;
+        while (i > 1) and (a[i - 1] = '/') do DEC(i); end;
+        return Ccore.strVal(a[0..i]), nil;
+    end;
+    if (i = k) and (k > 0) then DEC(i); end;    (* the root itself *)
+    if n = 2 then
+        x := try argStr(e, 1);    (* a suffix, unless it is all of it *)
+        if (LEN(x) < k - i) and (a[k - LEN(x)..k] = x) then k := k - LEN(x); end;
+    end;
+    return Ccore.strVal(a[i..k]), nil;
+end;
+
+(* The builtin routine e calls. *)
+proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var
+    a, b, c: []U8; v: Ccore.Val; buf: Buf.Buf; out: Vals.Vec; x: ^Csyntax.Expr; r: ^Cvars.Var; g: []Cvars.Var;
+    n, i, k: INT; ia, ib: I64; got: BOOL;
+begin
+    match e^.bi of
+    | bWrite, bWriteln:
+        n := try need(e, 0, 999);
+        Buf.init(ADR(buf), Ccore.temps);
+        for i := 0 to n - 1 do Buf.str(ADR(buf), try argStr(e, i)); end;
+        if e^.bi = Csyntax.bWriteln then Buf.add(ADR(buf), '\n'); end;
+        Ccore.put(1, Buf.bytes(ADR(buf)));
+    | bReadln:
+        _ := try need(e, 1, 1);
+        x := try lvar(e);
+        v, got := try readLine();
+        try Cvars.assign(x^.s, v);
+        return Ccore.boolVal(got), nil;
+    | bInc, bDec:
+        n := try need(e, 1, 2);
+        x := try lvar(e);
+        ia := 1;
+        if n = 2 then ia := try Ccore.toInt(try eval(e^.args[1])); end;
+        r := Cvars.find(x^.s);
+        if r = nil then return {}, Cvars.undefined(x^.s); end;
+        ib := try Ccore.toInt(r^.v);
+        if e^.bi = Csyntax.bDec then ia := try Ccore.intSub(ib, ia); else ia := try Ccore.intAdd(ib, ia); end;
+        try Cvars.store(r, Ccore.intVal(ia));
+    | bHalt:
+        n := try need(e, 0, 1);
+        if n = 1 then leave(INT(I32(try Ccore.toInt(try eval(e^.args[0]))))); end;
+        leave(Cvars.status());
+    | bLength:
+        _ := try need(e, 1, 1);
+        v := try valueOf(e^.args[0]);
+        if (v.kind = Ccore.kBool) or (v.kind = Ccore.kInt) then
+            return {}, Ccore.fail(Ccore.text("length of {}", [Fmt.str(Ccore.kindName(v.kind))]));
+        end;
+        return Ccore.intVal(v.n), nil;
+    | bCopy: return copyOf(e, try need(e, 2, 3));
+    | bPos:
+        _ := try need(e, 2, 2);
+        a := try argStr(e, 0);
+        b := try argStr(e, 1);
+        if LEN(a) = 0 then return Ccore.intVal(0), nil; end;
+        return Ccore.intVal(search(b, a)), nil;
+    | bInt:
+        _ := try need(e, 1, 1);
+        return Ccore.intVal(try Ccore.toInt(try eval(e^.args[0]))), nil;
+    | bStr:
+        _ := try need(e, 1, 1);
+        return Ccore.toStr(try eval(e^.args[0])), nil;
+    | bTrim:
+        _ := try need(e, 1, 1);
+        a := try argStr(e, 0);
+        i := 0;
+        k := LEN(a);
+        while (i < k) and isBlank(a[i]) do INC(i); end;
+        while (k > i) and isBlank(a[k - 1]) do DEC(k); end;
+        return Ccore.strVal(a[i..k]), nil;
+    | bSplit:
+        n := try need(e, 1, 2);
+        a := try argStr(e, 0);
+        b := "";
+        if n = 2 then b := try argStr(e, 1); end;
+        return split(a, b), nil;
+    | bLines:
+        _ := try need(e, 1, 1);
+        a := try argStr(e, 0);
+        if (LEN(a) > 0) and (a[LEN(a) - 1] = '\n') then a := a[0..LEN(a) - 1]; end;
+        if LEN(a) = 0 then return {kind: Ccore.kList}, nil; end;
+        return split(a, "\n"), nil;
+    | bJoin:
+        n := try need(e, 1, 2);
+        v := try eval(e^.args[0]);
+        if v.kind # Ccore.kList then return {}, Ccore.fail("join needs a list"); end;
+        b := " ";
+        if n = 2 then b := try argStr(e, 1); end;
+        Buf.init(ADR(buf), Ccore.temps);
+        for i := 0 to INT(v.n) - 1 do
+            if i > 0 then Buf.str(ADR(buf), b); end;
+            Buf.str(ADR(buf), Ccore.bytes(Ccore.toStr(Ccore.items(v)[i])));
+        end;
+        return Ccore.bufVal(ADR(buf)), nil;
+    | bGlob:
+        _ := try need(e, 1, 1);
+        Vals.init(ADR(out), Ccore.temps);
+        _ := Cglob.glob(try argStr(e, 0), ADR(out));
+        return Ccore.listVal(ADR(out)), nil;
+    | bExists:
+        _ := try need(e, 1, 1);
+        return Ccore.boolVal(Cglob.pathKind(try argStr(e, 0)) # Cglob.none), nil;
+    | bIsDir:
+        _ := try need(e, 1, 1);
+        return Ccore.boolVal(Cglob.pathKind(try argStr(e, 0)) = Cglob.dir), nil;
+    | bIsFile:
+        _ := try need(e, 1, 1);
+        return Ccore.boolVal(Cglob.pathKind(try argStr(e, 0)) = Cglob.file), nil;
+    | bChr:
+        _ := try need(e, 1, 1);
+        ia := try Ccore.toInt(try eval(e^.args[0]));
+        v := Ccore.strVal(" ");
+        Ccore.bytes(v)[0] := U8(ia & 255);
+        return v, nil;
+    | bOrd:
+        _ := try need(e, 1, 1);
+        a := try argStr(e, 0);
+        if LEN(a) = 0 then return {}, Ccore.fail("ord of empty string"); end;
+        return Ccore.intVal(I64(a[0])), nil;
+    | bUpcase, bLowcase:
+        _ := try need(e, 1, 1);
+        v := Ccore.strVal(try argStr(e, 0));
+        if e^.bi = Csyntax.bUpcase then Str.upper(Ccore.bytes(v)); else Str.lower(Ccore.bytes(v)); end;
+        return v, nil;
+    | bMatch:
+        _ := try need(e, 2, 2);
+        a := try argStr(e, 0);
+        b := try argStr(e, 1);
+        return Ccore.boolVal(Cglob.matches(b, a)), nil;
+    | bDefined:
+        _ := try need(e, 1, 1);
+        return Ccore.boolVal(Cvars.find(try argStr(e, 0)) # nil), nil;
+    | bEnviron:
+        _ := try need(e, 0, 0);
+        Vals.init(ADR(out), Ccore.temps);
+        g := Cvars.allGlobals();
+        for i := 0 to LEN(g) - 1 do
+            if g[i].exported then Vals.push(ADR(out), Ccore.strVal(g[i].name)); end;
+        end;
+        try sortVals(Vals.all(ADR(out)));
+        return Ccore.listVal(ADR(out)), nil;
+    | bGetenv:
+        _ := try need(e, 1, 1);
+        r := Cvars.findGlobal(try argStr(e, 0));
+        if (r # nil) and r^.exported then return Ccore.toStr(r^.v), nil; end;
+        return {kind: Ccore.kStr}, nil;
+    | bSetenv:
+        _ := try need(e, 2, 2);
+        a := try argStr(e, 0);
+        b := try argStr(e, 1);
+        if not envName(a) then return {}, Ccore.failOn(e^.s, "not a variable name"); end;
+        r := Cvars.findGlobal(a);
+        if r = nil then r := Cvars.global(Ccore.perm(a)); end;
+        try Cvars.store(r, Ccore.strVal(b));
+        r^.exported := true;
+    | bNow:
+        _ := try need(e, 0, 0);
+        return Ccore.intVal(Sys.now() div 1000000), nil;
+    | bTime:
+        n := try need(e, 1, 2);
+        ia := Sys.now() div 1000000;
+        if n = 2 then ia := try Ccore.toInt(try eval(e^.args[1])); end;
+        return Ccore.strVal(try Cclock.format(try argStr(e, 0), ia)), nil;
+    | bBasename: return pathPart(e, try need(e, 1, 2));
+    | bDirname: return pathPart(e, try need(e, 1, 1));
+    | bCompletions:
+        _ := try need(e, 1, 1);
+        return {}, missing("completions()");
+    | bSort:
+        _ := try need(e, 1, 1);
+        v := try eval(e^.args[0]);
+        if v.kind # Ccore.kList then
+            return {}, Ccore.fail(Ccore.text("sort needs a list, got {}", [Fmt.str(Ccore.kindName(v.kind))]));
+        end;
+        Vals.init(ADR(out), Ccore.temps);
+        for i := 0 to INT(v.n) - 1 do Vals.push(ADR(out), Ccore.items(v)[i]); end;
+        try sortVals(Vals.all(ADR(out)));
+        return Ccore.listVal(ADR(out)), nil;
+    | bReplace:
+        _ := try need(e, 3, 3);
+        a := try argStr(e, 0);
+        b := try argStr(e, 1);
+        c := try argStr(e, 2);
+        if LEN(b) = 0 then return {}, Ccore.failOn(e^.s, "nothing to replace"); end;
+        Buf.init(ADR(buf), Ccore.temps);
+        Str.replace(ADR(buf), a, b, c);
+        return Ccore.bufVal(ADR(buf)), nil;
+    | bNone:
+    end;
+    return {}, nil;
 end;
 
 (* --------------------------------------------------------- commands *)

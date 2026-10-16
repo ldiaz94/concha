@@ -43,7 +43,8 @@ before it is started, not after.
       files and the hooks. The parts that depend on the rest only one
       way are modules of their own: `Cvars`, the variables, the
       procedures, "did you mean", `~user` and PATH; `Cglob`, patterns
-      and globbing; and `Ccomplete`, completion and the spec files,
+      and globbing; `Cclock`, `time()`'s format; and `Ccomplete`,
+      completion and the spec files,
       which `Cinterp` imports and hands the user's `complete` function
       as a parameter. Until a step is done, what it brings answers
       that it is missing.
@@ -66,7 +67,13 @@ before it is started, not after.
         globs, errexit, pipefail, exec failures, background lists and
         signals, by standard output, standard error and status. Job
         control wants a terminal, and is checked at step 7.
-  - [ ] (c) the builtins.
+  - [x] (c) the builtins, and `Cclock`. `tests/test.cn` runs under
+        a scratch driver to its first `completions()`, line 676, as
+        under the Pascal; 40 more scripts of builtins, their errors,
+        `trap`, `source`, `exec`, `wait` and the job commands give the
+        same output, errors and status. It found that a call lost its
+        caller's locals (`Cvars.leave` cut the stack to the caller's
+        base), now mended.
   - [ ] (d) completion, the spec files and the hooks; `Ccomplete`.
 - [ ] 7. `Concha`: the command line, the REPL, startup, the queries.
       `make test` passes `tests/test.cn`.

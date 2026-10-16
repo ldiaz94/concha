@@ -28,8 +28,9 @@ is the port before this one, and the model for it.
 - Modules keep the Pascal units' jobs and order, each named with a `C`:
   `Ccore`, `Csyntax`, `Cedit`, `Cinterp`, `Concha`; `Cfuzzy`
   and `Czone` are what the Pascal took from outside (fuzzy(3), hora(3)),
-  and `Cvars`, `Cglob` and `Ccomplete` the parts of `interp.pas` that
-  depend on the rest one way only.
+  and `Cvars`, `Cglob`, `Cclock` and `Ccomplete` the parts of
+  `interp.pas` that depend on the rest one way only; `Ckern` is the one
+  system call `Sys` hasn't as a shell needs it.
 - Idiomatic raz, not Pascal transcribed: an error is an `ERROR`
   passed on with `try`, strings are `[]U8`, growable arrays are `Vec`,
   procedures and variables are `lowerCamel`, types `Capitalised`

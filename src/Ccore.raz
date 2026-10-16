@@ -196,8 +196,9 @@ begin
 end;
 
 (* What strerror says, for the errors concha's callers meet; e is the
-   errno, positive. *)
+   errno, positive. Good until the arena's next release. *)
 proc errText*(e: INT): []U8;
+var s: []U8; p: ^U8;
 begin
     match e of
     | errNoEnt: return "no such file or directory";
@@ -212,7 +213,11 @@ begin
     | errIntr: return "interrupted system call";
     | errInval: return "invalid argument";
     | errPerm: return "operation not permitted";
-    | else: return text("error {}", [Fmt.int(e)]);
+    | else:
+        s := text("error {}", [Fmt.int(e)]);
+        p := alloc(LEN(s));    (* a copy: a caller may give it to text *)
+        COPY(p[0..LEN(s)], s);
+        return p[0..LEN(s)];
     end;
 end;
 

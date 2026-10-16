@@ -34,9 +34,10 @@ type
     end;
 
     (* Where the stack of locals stood before a call, to stand there
-       again after it *)
+       again after it: its top, and the base and depth of the frame on
+       top *)
     Frame* = record
-        base, depth: INT;
+        top, base, depth: INT;
     end;
 
     (* The closest name to a target seen so far, for "did you mean" *)
@@ -220,13 +221,19 @@ end;
 
 (* ------------------------------------------------------------ frames *)
 
+(* The stack as it stands, to give leave. *)
+proc here*: Frame;
+begin
+    return {top: locals.len, base: base, depth: depth};
+end;
+
 (* A procedure's frame, on top of the stack; what leave takes to put
    the stack back. *)
 proc enter*: (Frame, ERROR);
 var f: Frame;
 begin
     if depth >= MaxDepth then return f, Ccore.fail("recursion too deep"); end;
-    f := {base: base, depth: depth};
+    f := here();
     base := locals.len;
     INC(depth);
     return f, nil;
@@ -250,16 +257,10 @@ proc leave*(f: Frame);
 var a: []Var; i: INT;
 begin
     a := Vars.all(ADR(locals));
-    for i := f.base to LEN(a) - 1 do Ccore.drop(a[i].v); end;
-    Vars.resize(ADR(locals), f.base);
+    for i := f.top to LEN(a) - 1 do Ccore.drop(a[i].v); end;
+    Vars.resize(ADR(locals), f.top);
     base := f.base;
     depth := f.depth;
-end;
-
-(* The frame on top, to give leave. *)
-proc here*: Frame;
-begin
-    return {base: base, depth: depth};
 end;
 
 (* ------------------------------------------------------- procedures *)
