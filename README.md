@@ -5,24 +5,21 @@ the Bourne shell: commands, pipes, redirection, heredocs, `&&`/`||` and `&`.
 It drops word splitting, quote mazes and `[ ... ]`. At the prompt it has
 its own line editor with persistent, searchable history.
 
-About 7000 lines of Pascal in ulam's subset, built by ulam and by Free
-Pascal alike. It uses ulam's `sys`, `dir` and `co`, and two libraries
-installed under `~/.local/lib/pascal`: `fuzzy` (fuzzy(3), from wuzzy) to
-rank completions and hora(3) for the time zone. No SysUtils, no classes,
-no exceptions, no AnsiStrings.
-Scratch values live in a mark/release arena, so memory stays flat in long
-loops.
+About 9800 lines of raz (`man raz`), with nothing but raz's library
+under it: no libc. Scratch values live in a mark/release arena, so
+memory stays flat in long loops. It was ported from a Free Pascal
+concha, whose language it keeps as it was.
 
-    make                        build with ulam (needs fuzzy(3) and hora(3))
-    make test                   the self-test, under ulam and under fpc
-    ./concha                    interactive (reads ~/.concharc)
-    ./concha script.cn a b      script; arguments in `args`
-    ./concha -c 'text' a b
-    ./concha -n script.cn       check syntax only, run nothing
-    ./concha -q check script.cn the first syntax error: line, column, message
-    ./concha -q outline f.cn    its procs, funcs and vars, with their places
-    ./concha -q words f.cn:3:1  what can be typed there
-    ./concha -q def f.cn:3:1    where the routine named there is declared
+    make                        build/concha, by the raz the Makefile names
+    make test                   the self-test, the examples, the man pages
+    concha                      interactive (reads ~/.concharc)
+    concha script.cn a b        script; arguments in `args`
+    concha -c 'text' a b
+    concha -n script.cn         check syntax only, run nothing
+    concha -q check script.cn   the first syntax error: line, column, message
+    concha -q outline f.cn      its procs, funcs and vars, with their places
+    concha -q words f.cn:3:1    what can be typed there
+    concha -q def f.cn:3:1      where the routine named there is declared
 
 The queries are what `concha-lsp(1)` (`~/lib/concha-lsp`), concha's
 language server, asks to give an editor errors, an outline,
@@ -32,16 +29,16 @@ To install:
 
     make && make install
 
-This installs `concha`, its two man pages, and the examples in
+This installs `concha`, its three man pages, and the examples in
 `$(DATADIR)/examples`.
-`PREFIX` (default `/usr/local`) and `DESTDIR` (for staged installs) are
-overridable, along with `ULAM`, `ULAMRTL` (for a build tree's ulam), `FPC`,
-`FPCFLAGS`, `BINDIR`, `MANDIR` and `DATADIR`; see the `Makefile`.
+`PREFIX` (default `~/.local`) and `DESTDIR` (for staged installs) are
+overridable, along with `RAZ`, `BINDIR`, `MANDIR` and `DATADIR`; see the
+`Makefile`.
 
 Documentation:
 
-- `man ./concha.1`: the complete reference
-- `man ./concha-tutorial.7`: a tour for shell users, with a table
+- `man ./doc/concha.1`: the complete reference
+- `man ./doc/concha-tutorial.7`: a tour for shell users, with a table
   translating sh to concha
 - [doc/internals.md](doc/internals.md): how it works, for people changing it
 - [examples/](examples/): short commented scripts, and

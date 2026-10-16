@@ -82,15 +82,25 @@ before it is started, not after.
         complete functions give the same `completions()`. What wants a
         terminal (Tab, "did you mean" offered as the next line, ctrl-x
         ctrl-e, job control) is checked at step 7.
-- [ ] 7. `Concha`: the command line, the REPL, startup, the queries.
-      `make test` passes `tests/test.cn`. Still in `interp.pas` for
-      it: `SetColour`, `Prompt`, `HomeC`, `DumbTerm`, `NoColour`,
-      `RunParsed`, and a way to say the shell is interactive. The REPL
-      calls `Cinterp.noteSignals` when `editLine` returns, so that a
-      hangup at the prompt reaches the jobs; Concha sets `Cedit.hooks`
-      to `Cinterp.complete`, `Ccomplete.knownCommand` and
-      `Cinterp.editFile`.
-- [ ] 8. `doc/concha.1`, `README.md`, `doc/internals.md`: the build
+- [x] 7. `Concha`: the command line, the REPL, startup, the queries.
+      `Cinterp` gives it `prompt`, `runTyped`, `setInteractive` and
+      `takeIntr`; the colour variables, and the looks at `TERM` and
+      `NO_COLOR`, are Concha's own. The REPL's `Catch` is a loop over
+      `turn`, which answers an `ERROR`. A signal noted only where the
+      shell looks wants the editor to look too: a hangup at the prompt
+      came while `editLine` waited for a key, so the editor calls a
+      hook, `signalled`, the shell's `noteSignals`, when a signal breaks
+      the wait. `make test` passes; the `-q` answers for every concha
+      script on the machine (7,155 of them: check, outline, dump, and
+      words and def at a dozen places each and at each ref) are the
+      Pascal's byte for byte, as are the bad queries, the options,
+      scripts' errors and statuses, `-c`, `-n` and standard input; and
+      26 scripts of keys through a pty (Tab, Ctrl-C at the prompt and in
+      a child, Ctrl-Z, `jobs`, `fg`, stopped jobs on the way out, "did
+      you mean", ctrl-x ctrl-e, the prompt procedure and its failure,
+      ctrl-l, `.concharc`'s errors, continuation lines, errexit, traps,
+      hangup with a job, history) give the same terminal and status.
+- [x] 8. `doc/concha.1`, `README.md`, `doc/internals.md`: the build
       and the insides are raz's.
 
 ## How the Pascal maps onto raz
@@ -125,13 +135,15 @@ made.
   frames and the fds above where it started, where the Pascal reset
   the whole shell: from `completions()` in a procedure, the procedure
   goes on with its own variables.
+- **A prompt procedure that fails on ctrl-l** gives way to the plain
+  prompt, and the line being typed stays; the Pascal dropped the line.
 - **ctrl-x ctrl-e's editor**, stopped with Ctrl-Z or not started for
   want of a fork, ends the edit with the line as the file holds it;
   the Pascal dropped the line.
 
 ## The handover
 
-1. [ ] **Same suite.** `tests/test.cn` passes under both concha's.
+1. [x] **Same suite.** `tests/test.cn` passes under both concha's.
 2. [ ] **Daily use.** The raz concha is the shell of one terminal for
    a week: `~/.concharc`, the prompt, completion, jobs, and the
    scripts under `~/lib` that are concha.

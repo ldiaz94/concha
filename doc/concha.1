@@ -1152,6 +1152,8 @@ in
 .Ql emacs -nw .
 What it leaves is echoed and run, and each of its lines goes into the
 history; if it leaves nothing, nothing runs.
+An editor stopped with Ctrl-Z, or one that cannot be started, ends the
+edit with the line as the file holds it.
 .It Ic ^L
 Clear the screen and redraw.
 .It Ic Up , Down , ^P , ^N
@@ -1731,7 +1733,11 @@ and when it isn't found the error suggests
 .Cm "env FOO=bar cmd"
 instead.
 .Sh BUGS
-Characters are assumed to be one column wide when editing.
+When editing, a character takes the columns
+.Xr wcwidth 3
+gives it, two for most CJK characters and emoji; a sequence of
+characters joined by zero-width joiners, as some emoji are, counts as
+its parts.
 Completion guesses what a word is from the line up to the cursor, and
 the guess can be wrong.
 .Pp
