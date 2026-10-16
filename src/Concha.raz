@@ -1,0 +1,584 @@
+(* Concha: the program, a shell that reads like Pascal.
+
+     concha                 interactive, reads ~/.concharc first
+     concha file [args]     run a script
+     concha -c text [args]  run text
+     concha -n [file]       parse only, run nothing
+     concha -q kind file    answer an editor: check, outline, words, def
+     concha -h | --help     print the usage
+     ... | concha           run standard input
+
+   A script runs to its end, or to its first error, which ends the
+   shell. At the prompt an error ends the line, and the next prompt
+   comes as if nothing had happened; a line that ends before what it
+   opens does is kept, and the next line goes on with it.
+
+   The queries of -q are for an editor, concha-lsp among them: they
+   answer on standard output, one line a thing and its fields split by
+   tabs, and run nothing. Their output is what concha-lsp reads, and
+   stays as it is.
+
+   Depends on Cinterp for running, on Csyntax for parsing and the notes
+   the queries read, on Cvars for the variables, on Cedit for the line
+   editor and on Ccomplete for what it is lent. Left out: the language,
+   which is the rest's. *)
+module Concha;
+import Sys, Files, Fmt, Buf, Heap, Ccore, Csyntax, Cvars, Cedit, Ccomplete, Cinterp;
+
+const
+    Usage = "usage: concha [-il]\n       concha script [arg ...]\n       concha -c text [arg ...]\n       concha -n [script]\n       concha -q check|outline|words|def script\n       concha -h | --help\n";
+    QueryUsage = "usage: concha -q check|outline|words|def script\n";
+
+    (* The colours a prompt may use, as variables of these names *)
+    ColourNames: [][]U8 = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bold", "dim", "reset"];
+    ColourCodes: [][]U8 = ["30", "31", "32", "33", "34", "35", "36", "37", "1", "2", "0"];
+
+var
+    top: Ccore.Mark;    (* the arena as it is between lines *)
+    line: Buf.Buf;    (* the line typed so far, more than one if it goes on *)
+    cont: BOOL;    (* line goes on: the prompt is ". " *)
+    inPrompt: BOOL;    (* the prompt is being written *)
+    plainPrompt: BOOL;    (* the prompt procedure failed: not used again *)
+    warned: BOOL;    (* told of stopped jobs on the way out *)
+    editing: BOOL;    (* lines come from the line editor *)
+
+(* --------------------------------------------------------- setup *)
+
+(* name in the home directory *)
+proc homeFile(name: []U8): []U8;
+begin
+    return Ccore.perm(Ccore.text("{}/{}", [Fmt.str(Cvars.home()), Fmt.str(name)]));
+end;
+
+(* The whole file at path, or the end of the shell with status bad,
+   saying why not. *)
+proc load(path: []U8; bad: INT): []U8;
+var b: Buf.Buf; e: INT;
+begin
+    Buf.init(ADR(b), Heap.heap);
+    e := Ccore.readFile(path, ADR(b));
+    if e < 0 then
+        Ccore.errHead;
+        Ccore.put(2, Ccore.text("cannot read {}: {}\n", [Fmt.str(path), Fmt.str(Ccore.errText(-e))]));
+        Sys.exit(bad);
+    end;
+    return Buf.bytes(ADR(b));
+end;
+
+proc dumbTerm: BOOL;
+var t: []U8;
+begin
+    t := Cvars.str("TERM");
+    return (LEN(t) = 0) or (t = "dumb");
+end;
+
+(* https://no-color.org: set and not empty means no colour *)
+proc noColour: BOOL;
+begin
+    return LEN(Cvars.str("NO_COLOR")) > 0;
+end;
+
+(* Colour on or off, for messages, and the colours' variables for
+   prompts: escape sequences, or "" when colour is off. They are
+   ordinary variables. *)
+proc setColour(on: BOOL);
+var m: Ccore.Mark; v: Ccore.Val; i: INT;
+begin
+    Ccore.opts^.colour := on;
+    m := Ccore.mark();
+    for i := 0 to LEN(ColourNames) - 1 do
+        v := Ccore.strVal("");
+        if on then v := Ccore.strVal(Ccore.text("\x1b[{}m", [Fmt.str(ColourCodes[i])])); end;
+        _ := Cvars.store(Cvars.global(ColourNames[i]), v);
+    end;
+    Ccore.release(m);
+end;
+
+(* ------------------------------------------------------ the queries *)
+
+(* -n: the syntax errors of the script at path ("": standard input)
+   reported, and nothing run. *)
+proc check(path: []U8);
+var text: []U8; err: ERROR;
+begin
+    if LEN(path) = 0 then text := load("/dev/stdin", 127); else text := load(path, 127); end;
+    Ccore.opts^.showCol := true;
+    _, err := Csyntax.parse(text, path);
+    if err # nil then Sys.exit(2); end;
+    Sys.exit(0);
+end;
+
+(* n and a tab on standard output *)
+proc putField(n: INT);
+begin
+    Ccore.put(1, Ccore.text("{}\t", [Fmt.int(n)]));
+end;
+
+(* The outline the parse noted: kind, name, line, column and last line
+   of each proc, func and var outside them; a proc still open at an
+   error ends on the error's line. *)
+proc putOutline;
+var o: []^Csyntax.OutItem; s: ^Csyntax.Stmt; kind: []U8; i, last: INT;
+begin
+    o := Csyntax.outline();
+    for i := 0 to LEN(o) - 1 do
+        s := o[i]^.st;
+        if (s^.kind = Csyntax.sProc) or (o[i]^.owner = nil) then
+            kind := "var";
+            if s^.kind = Csyntax.sProc then
+                kind := "proc";
+                if s^.isFunc then kind := "func"; end;
+            end;
+            last := o[i]^.last;
+            if last = 0 then last := Ccore.where^.line; end;
+            Ccore.put(1, Ccore.text("{}\t{}\t", [Fmt.str(kind), Fmt.str(s^.s)]));
+            putField(s^.line);
+            putField(s^.col);
+            Ccore.put(1, Ccore.text("{}\n", [Fmt.int(last)]));
+        end;
+    end;
+end;
+
+(* A line of -q words: kind, word and detail *)
+proc putWord(kind, w, detail: []U8);
+begin
+    Ccore.put(1, Ccore.text("{}\t{}\t{}\n", [Fmt.str(kind), Fmt.str(w), Fmt.str(detail)]));
+end;
+
+(* Is line l inside the procedure o, open or not? *)
+proc inside(o: ^Csyntax.OutItem; l: INT): BOOL;
+begin
+    return (o^.st^.line <= l) and ((o^.last = 0) or (l <= o^.last));
+end;
+
+(* A procedure's line of -q words: kind, name and signature *)
+proc putProc(s: ^Csyntax.Stmt);
+var i: INT;
+begin
+    if s^.isFunc then Ccore.put(1, "func\t"); else Ccore.put(1, "proc\t"); end;
+    Ccore.put(1, s^.s);
+    Ccore.put(1, "\t");
+    Ccore.put(1, s^.s);
+    Ccore.put(1, "(");
+    for i := 0 to LEN(s^.params) - 1 do
+        Ccore.put(1, s^.params[i]);
+        if i < LEN(s^.params) - 1 then Ccore.put(1, ", "); end;
+    end;
+    Ccore.put(1, ")\n");
+end;
+
+(* -q words at line l, column c: the keywords and builtins, the
+   procedures of the file, and the variables in scope there: those
+   declared before it outside a procedure or inside one around it, and
+   the parameters of the procedures around it. *)
+proc putWords(l, c: INT);
+var o: []^Csyntax.OutItem; s: ^Csyntax.Stmt; i, j: INT;
+begin
+    for i := 0 to LEN(Csyntax.Keywords) - 1 do putWord("keyword", Csyntax.Keywords[i], ""); end;
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do
+        putWord("builtin", Csyntax.Builtins[i].name, Csyntax.Builtins[i].usage);
+    end;
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+        putWord("builtin", Csyntax.CmdBuiltins[i].name, Csyntax.CmdBuiltins[i].usage);
+    end;
+    o := Csyntax.outline();
+    for i := 0 to LEN(o) - 1 do
+        if o[i]^.st^.kind = Csyntax.sProc then putProc(o[i]^.st); end;
+    end;
+    for i := 0 to LEN(o) - 1 do
+        s := o[i]^.st;
+        if s^.kind # Csyntax.sProc then
+            if ((s^.line < l) or ((s^.line = l) and (s^.col < c))) and ((o[i]^.owner = nil) or inside(o[i]^.owner, l)) then
+                putWord("var", s^.s, "");
+            end;
+        elsif inside(o[i], l) then
+            for j := 0 to LEN(s^.params) - 1 do putWord("var", s^.params[j], ""); end;
+        end;
+    end;
+end;
+
+(* The decimal number s, or -1 *)
+proc num(s: []U8): INT;
+var r, i: INT;
+begin
+    if LEN(s) = 0 then return -1; end;
+    r := 0;
+    for i := 0 to LEN(s) - 1 do
+        if (s[i] < '0') or (s[i] > '9') then return -1; end;
+        r := r * 10 + INT(s[i]) - 48;
+    end;
+    return r;
+end;
+
+(* "file:line:col" cut at its last two colons: the file, the line and
+   the column, and false if it has no line and column. *)
+proc splitPos(s: []U8): ([]U8, INT, INT, BOOL);
+var i, j, l, c: INT;
+begin
+    j := LEN(s);
+    while (j > 0) and (s[j - 1] # ':') do DEC(j); end;
+    i := j - 1;
+    while (i > 0) and (s[i - 1] # ':') do DEC(i); end;
+    if (j = 0) or (i <= 0) then return s, 0, 0, false; end;
+    l := num(s[i..j - 1]);
+    c := num(s[j..LEN(s)]);
+    return s[0..i - 1], l, c, (l >= 0) and (c >= 0);
+end;
+
+(* -q dump, for test.cn only: each use the parse noted, as name, line,
+   column and length of its name. *)
+proc putDump;
+var r: []Csyntax.Ref; i: INT;
+begin
+    r := Csyntax.refs();
+    for i := 0 to LEN(r) - 1 do
+        Ccore.put(1, r[i].name);
+        Ccore.put(1, "\t");
+        putField(r[i].line);
+        putField(r[i].col);
+        Ccore.put(1, Ccore.text("{}\n", [Fmt.int(r[i].len)]));
+    end;
+end;
+
+(* The proc or func that name refers to from inside the procedure scope
+   (nil: outside any): the innermost declaration visible there, wherever
+   in the file it stands; nil if none. *)
+proc resolve(name: []U8; scope: ^Csyntax.OutItem): ^Csyntax.OutItem;
+var o: []^Csyntax.OutItem; i: INT;
+begin
+    o := Csyntax.outline();
+    while true do
+        for i := 0 to LEN(o) - 1 do
+            if (o[i]^.st^.kind = Csyntax.sProc) and (o[i]^.owner = scope) and (o[i]^.st^.s = name) then return o[i]; end;
+        end;
+        if scope = nil then return nil; end;
+        scope := scope^.owner;
+    end;
+end;
+
+(* -q def at line l, column c: the declaration, as line, column and
+   name, of the proc or func whose name is there, in a call or in the
+   declaration itself; nothing elsewhere. *)
+proc putDef(l, c: INT);
+var o: []^Csyntax.OutItem; r: []Csyntax.Ref; d: ^Csyntax.OutItem; s: ^Csyntax.Stmt; i: INT;
+begin
+    d := nil;
+    o := Csyntax.outline();
+    for i := 0 to LEN(o) - 1 do
+        s := o[i]^.st;
+        if (d = nil) and (s^.kind = Csyntax.sProc) and (s^.line = l) and (c >= s^.col) and (c < s^.col + LEN(s^.s)) then
+            d := o[i];
+        end;
+    end;
+    r := Csyntax.refs();
+    for i := 0 to LEN(r) - 1 do
+        if (d = nil) and (r[i].line = l) and (c >= r[i].col) and (c < r[i].col + r[i].len) then
+            d := resolve(r[i].name, r[i].owner);
+        end;
+    end;
+    if d = nil then return; end;
+    putField(d^.st^.line);
+    putField(d^.st^.col);
+    Ccore.put(1, d^.st^.s);
+    Ccore.put(1, "\n");
+end;
+
+(* -q kind script: a query about the script ("-": standard input)
+   answered on standard output, nothing run; status 0 when answered,
+   even with an error found, 2 for a bad query. The kinds are check,
+   the line, column and message of the first syntax error; outline;
+   words, the words that can be typed at file:line:column; and def, the
+   declaration of the procedure named there. *)
+proc query(a: INT);
+var kind, path, text: []U8; l, c: INT; ok, words, def, dump: BOOL; err: ERROR;
+begin
+    if a + 3 # ARGC() then
+        Ccore.errHead;
+        Ccore.put(2, QueryUsage);
+        Sys.exit(2);
+    end;
+    kind := Files.arg(a + 1);
+    words := kind = "words";
+    def := kind = "def";
+    dump := kind = "dump";
+    if not words and not def and not dump and (kind # "outline") and (kind # "check") then
+        Ccore.errHead;
+        Ccore.put(2, Ccore.text("-q: unknown query: {}\n", [Fmt.str(kind)]));
+        Sys.exit(2);
+    end;
+    path := Files.arg(a + 2);
+    if words or def then
+        path, l, c, ok := splitPos(path);
+        if not ok then
+            Ccore.errHead;
+            Ccore.put(2, Ccore.text("-q: {} needs file:line:column\n", [Fmt.str(kind)]));
+            Sys.exit(2);
+        end;
+    end;
+    if path = "-" then path := "/dev/stdin"; end;
+    text := load(path, 2);
+    Ccore.opts^.keepErr := true;
+    if kind = "check" then
+        _, err := Csyntax.parse(text, path);
+        if err # nil then
+            putField(Ccore.where^.line);
+            putField(Ccore.where^.col);
+            Ccore.put(1, Ccore.kept());
+            Ccore.put(1, "\n");
+        end;
+        Sys.exit(0);
+    end;
+    _, err := Csyntax.parseNoted(text, path);
+    if (err # nil) and (words or def) then Csyntax.noteProcsAfter(Ccore.where^.line); end;
+    if words then putWords(l, c);
+    elsif def then putDef(l, c);
+    elsif dump then putDump;
+    else putOutline;
+    end;
+    Sys.exit(0);
+end;
+
+(* -------------------------------------------------------- scripts *)
+
+(* The script text, from the file path ("" if none), run, and the end
+   of the shell: with the status the script left, 130 after a Ctrl-C,
+   or 2 after an error. *)
+proc script(text, path: []U8);
+var err: ERROR;
+begin
+    err := Cinterp.runText(text, path);
+    if err # nil then
+        Cinterp.recover;
+        if err = Ccore.Stopped then Cinterp.leave(130);
+        elsif err = Ccore.ErrExit then Cinterp.leave(Cvars.status());
+        else Cinterp.leave(2);
+        end;
+    end;
+    Cinterp.leave(Cvars.status());
+end;
+
+(* ~/.concharc, if there is one, run; an error in it ends it, not the
+   shell. *)
+proc runRc;
+var b: Buf.Buf;
+begin
+    Buf.init(ADR(b), Heap.heap);
+    if Ccore.readFile(homeFile(".concharc"), ADR(b)) < 0 then return; end;
+    _ := Cinterp.runText(Buf.bytes(ADR(b)), ".concharc");
+    Cinterp.recover;
+    Ccore.release(top);
+end;
+
+(* ------------------------------------------------------- the prompt *)
+
+(* The prompt, and if the user's procedure fails in it, the plain one
+   from then on. *)
+proc prompt: ERROR;
+begin
+    inPrompt := true;
+    try Cinterp.prompt(cont, not plainPrompt);
+    inPrompt := false;
+    return nil;
+end;
+
+(* For the line editor's ctrl-l: the prompt again. An error here is
+   the prompt procedure's, and the plain prompt stands in for it. *)
+proc redraw;
+begin
+    if prompt() # nil then
+        Cinterp.recover;
+        inPrompt := false;
+        plainPrompt := true;
+        _ := prompt();
+    end;
+end;
+
+(* A line of input added to line: from the line editor, or as much as
+   one read gives. *)
+proc getLine: Cedit.Got;
+var chunk: [4096]U8; g: Cedit.Got; s: []U8; k: INT;
+begin
+    if editing then
+        g, s := Cedit.editLine(cont);
+        Cinterp.noteSignals;
+        Buf.str(ADR(line), s);
+        return g;
+    end;
+    k := Sys.read(0, chunk);
+    if k < 0 then
+        if k # -Ccore.errIntr then return Cedit.gotEof; end;
+        Cinterp.noteSignals;
+        Ccore.put(2, "\n");
+        return Cedit.gotCancel;
+    end;
+    if k = 0 then return Cedit.gotEof; end;
+    Buf.str(ADR(line), chunk[0..k]);
+    return Cedit.gotLine;
+end;
+
+(* Leaving with jobs stopped needs asking twice in a row. *)
+proc mayLeave: BOOL;
+begin
+    if warned or not Cinterp.stoppedJobs() then return true; end;
+    Ccore.errHead;
+    Ccore.put(2, "there are stopped jobs\n");
+    warned := true;
+    return false;
+end;
+
+(* The line ended, or dropped *)
+proc newLine;
+begin
+    Buf.reset(ADR(line));
+    cont := false;
+end;
+
+(* One turn of the prompt: a line read and run; true when the shell is
+   to leave. *)
+proc turn: (BOOL, ERROR);
+var text: []U8;
+begin
+    Ccore.release(top);
+    if Cinterp.takeIntr() then Ccore.put(2, "\n"); end;
+    if not cont then
+        Cinterp.reapJobs;
+        try Cinterp.checkTraps();
+    end;
+    try prompt();
+    match getLine() of
+    | gotCancel:
+        newLine;
+        return false, nil;
+    | gotEof:
+        if (line.len = 0) and mayLeave() then return true, nil; end;
+        Ccore.put(2, "\n");
+        newLine;
+        return false, nil;
+    | gotLine:
+    end;
+    text := Buf.bytes(ADR(line));
+    if text[LEN(text) - 1] # '\n' then
+        cont := true;
+        return false, nil;
+    end;
+    try Cinterp.runTyped(text);
+    newLine;
+    if Cinterp.ctl # Cinterp.cExit then
+        warned := false;
+    elsif mayLeave() then
+        return true, nil;
+    else
+        Cinterp.recover;    (* the exit, and nothing else, undone *)
+    end;
+    return false, nil;
+end;
+
+(* The prompt's turns, until the shell is to leave. After an error the
+   shell is put back as it is between lines; a line that goes on is
+   kept. *)
+proc repl;
+var done: BOOL; err: ERROR;
+begin
+    while true do
+        done, err := turn();
+        if done then break; end;
+        if err # nil then
+            Cedit.reset;
+            Cinterp.recover;
+            Ccore.release(top);
+            if inPrompt then plainPrompt := true; end;
+            inPrompt := false;
+            if err = Ccore.More then cont := true; else newLine; end;
+        end;
+    end;
+    Cinterp.leave(Cvars.status());
+end;
+
+(* ---------------------------------------------------- the command line *)
+
+(* Is argument i the option -c, for c? *)
+proc isOpt(i: INT; c: U8): BOOL;
+var s: []U8;
+begin
+    if i >= ARGC() then return false; end;
+    s := Files.arg(i);
+    return (LEN(s) = 2) and (s[0] = '-') and (s[1] = c);
+end;
+
+proc isHelp(i: INT): BOOL;
+begin
+    return isOpt(i, 'h') or ((i < ARGC()) and (Files.arg(i) = "--help"));
+end;
+
+(* The first argument after -l and -i, alone or together, as terminals
+   and login programs pass them: -l asks for a login shell, which here
+   is any shell; and whether -i, which asks for the prompt even without
+   a terminal, was among them. *)
+proc options: (INT, BOOL);
+var s: []U8; a, k: INT; forceI, i: BOOL;
+begin
+    a := 1;
+    forceI := false;
+    while a < ARGC() do
+        s := Files.arg(a);
+        if (LEN(s) < 2) or (s[0] # '-') or ((s[1] # 'i') and (s[1] # 'l')) then break; end;
+        k := 1;
+        i := false;
+        while (k < LEN(s)) and ((s[k] = 'i') or (s[k] = 'l')) do
+            if s[k] = 'i' then i := true; end;
+            INC(k);
+        end;
+        if k < LEN(s) then break; end;
+        forceI := forceI or i;
+        INC(a);
+    end;
+    return a, forceI;
+end;
+
+proc main*;
+var text: []U8; a: INT; forceI: BOOL;
+begin
+    a, forceI := options();
+    if isHelp(a) then
+        Ccore.put(1, Usage);
+        Sys.exit(0);
+    end;
+    Buf.init(ADR(line), Heap.heap);
+    top := Ccore.mark();
+    Cinterp.initShell;
+    setColour(Sys.isTerminal(2) and not dumbTerm() and not noColour());
+    if isOpt(a, 'c') and (a + 1 < ARGC()) then
+        Cinterp.setArgs(a + 2);
+        Cinterp.onSignals;
+        script(Files.arg(a + 1), "");
+    end;
+    if isOpt(a, 'n') then
+        if a + 1 < ARGC() then check(Files.arg(a + 1)); else check(""); end;
+    end;
+    if isOpt(a, 'q') then query(a); end;
+    if a < ARGC() then
+        text := load(Files.arg(a), 127);
+        Cinterp.setArgs(a + 1);
+        Cinterp.onSignals;
+        script(text, Files.arg(a));
+    end;
+    Cinterp.setArgs(a);
+    if forceI or Sys.isTerminal(0) then
+        Cinterp.setInteractive;
+        Cinterp.onSignals;
+        Cinterp.jobControl;
+        editing := Sys.isTerminal(0) and Sys.isTerminal(2) and not dumbTerm();
+        if editing then
+            Cedit.histLoad(homeFile(".concha_history"));
+            Cedit.hooks^ := {reprompt: redraw, complete: Cinterp.complete, known: Ccomplete.knownCommand, editor: Cinterp.editFile, signalled: Cinterp.noteSignals};
+        end;
+        runRc;
+        repl;
+    end;
+    Buf.reset(ADR(line));
+    if Ccore.readFile("/dev/stdin", ADR(line)) < 0 then Sys.exit(1); end;
+    Cinterp.onSignals;
+    script(Buf.bytes(ADR(line)), "");
+end;
+
+end Concha.

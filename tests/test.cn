@@ -625,7 +625,7 @@ check('-q words broken', `$cn -q words $qdir/wbroken.cn:4:1 | grep -E "^(proc|fu
   'proc'#9'p'#10'func'#9'later'#10'var'#9'a'#10'var'#9'q')
 check('-q words no position', `$cn -q words $qdir/words.cn 2>/dev/null; echo $status`, '2')
 { every detail is the one concha.1 shows }
-var man := `env GROFF_NO_SGR=1 groff -mdoc -Tascii -rLL=300n concha.1 | col -b`
+var man := `env GROFF_NO_SGR=1 groff -mdoc -Tascii -rLL=300n doc/concha.1 | col -b`
 var missing := ''
 for l in lines(`$cn -q words $qdir/words.cn:1:1 | grep "^builtin"`) do
   if not (split(l, #9)[2] in man) then missing := missing + ' ' + split(l, #9)[2]

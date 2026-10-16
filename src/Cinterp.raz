@@ -2571,7 +2571,15 @@ begin
     tailOk := false;
     keepFds := false;
     exempt := 0;
+    inPromptProc := false;
     intr := false;
+end;
+
+(* A line typed at the prompt, parsed and run; More, with nothing
+   written, if it ends before what it opens does. *)
+proc runTyped*(text: []U8): ERROR;
+begin
+    return execList(try Csyntax.parseTyped(text));
 end;
 
 (* -------------------------------------------- completion, editing *)
@@ -2705,6 +2713,48 @@ begin
     r^.exported := false;
     r^.readOnly := true;
     Cvars.setStatus(0);
+end;
+
+(* The shell reads its commands at a prompt: a message gives no line
+   number, and a command not found suggests a fix. *)
+proc setInteractive*;
+begin
+    interactive := true;
+    Ccore.opts^.showLine := false;
+end;
+
+(* Did a Ctrl-C stop what ran since the last call? *)
+proc takeIntr*: BOOL;
+var was: BOOL;
+begin
+    was := intr;
+    intr := false;
+    return was;
+end;
+
+(* The prompt, on standard error: ". " for a line that goes on; else
+   the user's procedure prompt, if custom and there is one; else the
+   last part of PWD and "> ". *)
+proc prompt*(more, custom: BOOL): ERROR;
+var def: ^Csyntax.Stmt; cwd: []U8; i: INT;
+begin
+    if more then
+        Ccore.put(2, ". ");
+        return nil;
+    end;
+    def := Cvars.findProc("prompt");
+    if custom and (def # nil) then
+        inPromptProc := true;
+        _ := try callProc(def, []);
+        inPromptProc := false;
+        return nil;
+    end;
+    cwd := Cvars.str("PWD");
+    i := LEN(cwd);
+    while (i > 0) and (cwd[i - 1] # '/') do DEC(i); end;
+    if LEN(cwd) > 1 then Ccore.put(2, cwd[i..LEN(cwd)]); else Ccore.put(2, cwd); end;
+    Ccore.put(2, "> ");
+    return nil;
 end;
 
 (* args: the command line's arguments from first on. *)

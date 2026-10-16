@@ -40,6 +40,7 @@ type
         complete*: Completer;
         known*: proc(name: []U8): BOOL;    (* can the command name run? *)
         editor*: proc(path: []U8);    (* ctrl-x ctrl-e: the user's editor on path *)
+        signalled*: proc;    (* a signal came while a key was awaited *)
     end;
 
     (* The line as it was before a change, for ctrl-_. *)
@@ -278,10 +279,17 @@ begin
     return r;
 end;
 
+(* A byte from the terminal, or -1 at its end. A signal that breaks
+   the wait is the shell's to look at: a hangup must end it now, not
+   after a key that never comes. *)
 proc rawByte: INT;
 var c: [1]U8; k: INT;
 begin
-    repeat k := Sys.read(0, c); until k # -Ccore.errIntr;
+    while true do
+        k := Sys.read(0, c);
+        if k # -Ccore.errIntr then break; end;
+        if hooks^.signalled # nil then hooks^.signalled(); end;
+    end;
     if k <= 0 then return -1; end;
     return c[0];
 end;
