@@ -1,0 +1,1784 @@
+(* Csyntax: the scanner, the parser and the syntax tree.
+
+   Two lexical worlds share one source. A statement that begins with a
+   keyword, an assignment x := or a call f( is Pascal; anything else is
+   a command, scanned as shell words up to a new line, a ; or a bare
+   end, else or until. Expressions are scanned as tokens with one of
+   lookahead, given back when an expression ends (rewind), so that each
+   world sees the text as it stands.
+
+   The tree is kept for good, from the heap: procedures point into it.
+   Its lists are slices, made with a Vec as they are parsed. A syntax
+   error is written where it is found, with the line and the column of
+   what is wrong, and passed on as Ccore.Failed; or as Ccore.More when
+   the input ended early and the caller (the REPL) would rather read on.
+
+   Depends on Ccore for the values, the errors and where they are. Left
+   out: what any of it means, which is Cinterp's. *)
+module Csyntax;
+import Heap, Rt, Buf, Fmt, Ccore, Parts := Vec(Part), Exprs := Vec(^Expr), Stmts := Vec(^Stmt), Words := Vec(Word), Redirs := Vec(Redir), Cmds := Vec(^Cmd), Pipes := Vec(Pipe), Arms := Vec(Arm), Names := Vec([]U8), Items := Vec(^OutItem), Refs := Vec(Ref), Heres := Vec(Here);
+
+type
+    (* A word of a command, or an interpolated string, is parsed into
+       parts. *)
+    PartKind* = (
+        ptLit,    (* text, s *)
+        ptVar,    (* $name or ${name}, the name s *)
+        ptExpr,    (* $(e) *)
+        ptCap,    (* `list`, a capture *)
+        ptHome,    (* ~ or ~user, the user s *)
+        ptSub    (* <(list), which a word is all of *)
+    );
+    Part* = record
+        kind*: PartKind;
+        quoted*: BOOL;    (* not to be split or globbed *)
+        s*: []U8;
+        e*: ^Expr;
+        cap*: []^Stmt;    (* a capture's or a <(...)'s statements *)
+    end;
+    Word* = []Part;
+
+    RedirKind* = (rIn, rOut, rApp, rBoth, rDup, rHere);
+    Redir* = record
+        kind*: RedirKind;
+        fd*: INT;
+        fd2*: INT;    (* rDup: the fd copied; rHere: 1 for <<<, which adds a new line *)
+        target*: Word;
+    end;
+
+    (* A stage of a pipeline: words to run, a Pascal call, or a block or a
+       control statement *)
+    Cmd* = record
+        words*: []Word;
+        call*: ^Expr;
+        stmt*: ^Stmt;
+        redirs*: []Redir;
+        line*: INT;
+        path*: []U8;    (* the file it came from, "" if none *)
+    end;
+
+    Join* = (jNone, jAnd, jOr);    (* how a pipeline goes on to the next: &&, || *)
+    Pipe* = record
+        cmds*: []^Cmd;
+        join*: Join;
+    end;
+
+    Builtin* = (
+        bNone, bWrite, bWriteln, bReadln, bInc, bDec, bHalt, bLength, bCopy, bPos, bInt, bStr,
+        bTrim, bSplit, bJoin, bLines, bGlob, bExists, bIsDir, bIsFile, bChr, bOrd, bUpcase,
+        bLowcase, bMatch, bDefined, bReplace, bSort, bEnviron, bGetenv, bSetenv, bNow, bTime,
+        bBasename, bDirname, bCompletions
+    );
+    Op* = (oNone, oAdd, oSub, oMul, oDiv, oMod, oAnd, oOr, oXor, oEq, oNe, oLt, oGt, oLe, oGe, oIn);
+    ExprKind* = (
+        eLit, eVar, eIndex, eCall, eBin, eNeg, eNot, eList, eInterp, eCap,
+        eRange    (* a..b, a case label *)
+    );
+    Expr* = record
+        kind*: ExprKind;
+        op*: Op;
+        v*: Ccore.Val;    (* a literal's *)
+        s*: []U8;    (* a variable's or a call's name *)
+        line*, col*: INT;    (* a variable's or a call's: where its name starts *)
+        bi*: Builtin;    (* a call's builtin, bNone for a procedure of the script's *)
+        a*, b*: ^Expr;
+        args*: []^Expr;    (* a call's arguments, a list's items *)
+        parts*: []Part;    (* an interpolated string's *)
+        cap*: []^Stmt;    (* a capture's *)
+    end;
+
+    Arm* = record
+        labels*: []^Expr;
+        body*: ^Stmt;
+    end;
+
+    StmtKind* = (sCmd, sAssign, sIf, sWhile, sRepeat, sFor, sForIn, sCase, sBlock, sVar, sExport, sProc, sBreak, sContinue, sExit);
+    Stmt* = record
+        kind*: StmtKind;
+        line*: INT;
+        path*: []U8;    (* the file it came from, "" if none *)
+        s*: []U8;    (* the name assigned, declared or counted *)
+        col*: INT;    (* a procedure's or a variable's name: its byte column *)
+        e*, e2*: ^Expr;
+        body*, els*: ^Stmt;
+        list*: []^Stmt;    (* a block's statements *)
+        pipes*: []Pipe;    (* a command's pipelines, joined by && and || *)
+        bg*: BOOL;    (* and run in the background *)
+        down*, isFunc*: BOOL;
+        arms*: []Arm;
+        params*: [][]U8;
+    end;
+
+    (* -q outline and -q words: a procedure or a variable, in source
+       order *)
+    OutItem* = record
+        st*: ^Stmt;    (* sProc, sVar or sExport *)
+        last*: INT;    (* its last line; 0 while a procedure is open *)
+        owner*: ^OutItem;    (* the procedure it is in, nil outside any *)
+    end;
+
+    (* -q def: a use of a name that may be a procedure's, in source order:
+       a command's plain word 0, or a call; where it is, and its length *)
+    Ref* = record
+        name*: []U8;
+        line*, col*, len*: INT;
+        owner*: ^OutItem;
+    end;
+
+    Doc* = record
+        name*: []U8;
+        usage*: []U8;    (* as concha.1 shows it; test.cn checks *)
+    end;
+
+    Tok = (tEOF, tIdent, tInt, tStr, tDStr, tBack, tAssign, tPlus, tMinus, tStar, tEq, tNe, tLt, tGt, tLe, tGe, tLP, tRP, tLB, tRB, tComma, tSemi, tColon, tDot, tSlash, tOther);
+    Closer = (cEnd, cElse, cUntil);
+    Closers = set of Closer;
+
+    (* A heredoc's body, from and up to bytes of the source, which the
+       scanner jumps over: the command it belongs to goes on after it *)
+    Here = record
+        from, upTo, lines: INT;
+    end;
+
+const
+    (* Builtins[INT(b) - 1] is b's *)
+    Builtins*: []Doc = [
+        {name: "write", usage: "write(e, ...)"},
+        {name: "writeln", usage: "writeln(e, ...)"},
+        {name: "readln", usage: "readln(v)"},
+        {name: "inc", usage: "inc(v[, n])"},
+        {name: "dec", usage: "dec(v[, n])"},
+        {name: "halt", usage: "halt([n])"},
+        {name: "length", usage: "length(x)"},
+        {name: "copy", usage: "copy(x, i[, n])"},
+        {name: "pos", usage: "pos(sub, s)"},
+        {name: "int", usage: "int(x)"},
+        {name: "str", usage: "str(x)"},
+        {name: "trim", usage: "trim(s)"},
+        {name: "split", usage: "split(s[, sep])"},
+        {name: "join", usage: "join(l[, sep])"},
+        {name: "lines", usage: "lines(s)"},
+        {name: "glob", usage: "glob(pattern)"},
+        {name: "exists", usage: "exists(p)"},
+        {name: "isdir", usage: "isdir(p)"},
+        {name: "isfile", usage: "isfile(p)"},
+        {name: "chr", usage: "chr(n)"},
+        {name: "ord", usage: "ord(s)"},
+        {name: "upcase", usage: "upcase(s)"},
+        {name: "lowcase", usage: "lowcase(s)"},
+        {name: "match", usage: "match(s, pattern)"},
+        {name: "defined", usage: "defined(name)"},
+        {name: "replace", usage: "replace(s, old, new)"},
+        {name: "sort", usage: "sort(l)"},
+        {name: "environ", usage: "environ()"},
+        {name: "getenv", usage: "getenv(name)"},
+        {name: "setenv", usage: "setenv(name, value)"},
+        {name: "now", usage: "now()"},
+        {name: "time", usage: "time(fmt[, ms])"},
+        {name: "basename", usage: "basename(p[, suffix])"},
+        {name: "dirname", usage: "dirname(p)"},
+        {name: "completions", usage: "completions(line)"}
+    ];
+
+    (* the builtins that are commands *)
+    CmdBuiltins*: []Doc = [
+        {name: "cd", usage: "cd [dir]"},
+        {name: "echo", usage: "echo [-n arg ...]"},
+        {name: "source", usage: "source file"},
+        {name: "wait", usage: "wait [pid ...]"},
+        {name: "exec", usage: "exec [command [arg ...]]"},
+        {name: "umask", usage: "umask [mode]"},
+        {name: "unset", usage: "unset name ..."},
+        {name: "ulimit", usage: "ulimit [-c | -f | -n | -s | -t | -v] [value | unlimited]"},
+        {name: "trap", usage: "trap name signal ..."},
+        {name: "jobs", usage: "jobs"},
+        {name: "fg", usage: "fg [job]"},
+        {name: "bg", usage: "bg [job]"},
+        {name: "disown", usage: "disown [job]"}
+    ];
+
+    Keywords*: [][]U8 = [
+        "begin", "end", "if", "then", "else", "while", "do", "repeat", "until", "for", "to",
+        "downto", "in", "case", "of", "var", "procedure", "function", "export", "break",
+        "continue", "exit", "and", "or", "not", "xor", "div", "mod", "otherwise", "nil"
+    ];
+
+var
+    src: []U8;
+    srcName: []U8;    (* the file being parsed, "" if none *)
+    pos, line: INT;
+    heres: Heres.Vec;
+    inBack: INT;    (* captures open *)
+    inSub: BOOL;    (* in a <(...): an unquoted ) closes it *)
+    closers: Closers;    (* the bare words that close what is open *)
+    quietEof: BOOL;    (* input that ends early is Ccore.More *)
+    outlining: BOOL;    (* the outline and the refs are noted *)
+    items: Items.Vec;    (* the outline *)
+    uses: Refs.Vec;    (* the refs *)
+    curProc: ^OutItem;    (* the innermost procedure open, when outlining *)
+
+    (* the lookahead token, and where the one before it ended *)
+    tok: Tok;
+    tokPos, tokLine: INT;
+    tokS: []U8;    (* a name's or a string's text *)
+    tokI: I64;
+    endPos, endLine: INT;
+
+(* ---------------------------------------------------------- scanner *)
+
+proc isDigit(c: U8): BOOL;
+begin
+    return (c >= '0') and (c <= '9');
+end;
+
+proc isIdStart(c: U8): BOOL;
+begin
+    return (c >= 'a') and (c <= 'z') or (c >= 'A') and (c <= 'Z') or (c = '_');
+end;
+
+proc isIdChar(c: U8): BOOL;
+begin
+    return isIdStart(c) or isDigit(c);
+end;
+
+(* Does c end a command's word? *)
+proc isWordEnd(c: U8): BOOL;
+begin
+    match c of
+    | 0, ' ', '\t', '\r', '\n', ';', '|', '&', '<', '>': return true;
+    | else: return false;
+    end;
+end;
+
+(* Does c end a word's plain text? *)
+proc isBareStop(c: U8): BOOL;
+begin
+    match c of
+    | '`', '\'', '"', '$', '\\': return true;
+    | else: return isWordEnd(c);
+    end;
+end;
+
+(* The byte at i, 0 past either end. *)
+proc at(i: INT): U8;
+begin
+    if (i < 0) or (i >= LEN(src)) then return 0; end;
+    return src[i];
+end;
+
+proc ch: U8;
+begin
+    return at(pos);
+end;
+
+(* One byte on, and over the bodies of heredocs a new line comes to. *)
+proc adv;
+var hs: []Here; i: INT; again: BOOL;
+begin
+    if pos >= LEN(src) then return; end;
+    INC(pos);
+    if src[pos - 1] # '\n' then return; end;
+    INC(line);
+    hs := Heres.all(ADR(heres));
+    repeat
+        again := false;
+        for i := 0 to LEN(hs) - 1 do
+            if hs[i].from = pos then
+                pos := hs[i].upTo;
+                INC(line, hs[i].lines);
+                again := true;
+            end;
+        end;
+    until not again;
+end;
+
+(* The column of byte ofs: bytes from the line's start, so that a heredoc
+   body or a character of several bytes before it counts as it stands. *)
+proc colOf(ofs: INT): INT;
+var i: INT;
+begin
+    i := ofs;
+    while (i > 0) and (src[i - 1] # '\n') do DEC(i); end;
+    return ofs - i + 1;
+end;
+
+(* The error msg about what starts at byte ofs, on line l. *)
+proc synErrAt(ofs, l: INT; msg: []U8): ERROR;
+begin
+    Ccore.where^.line := l;
+    Ccore.where^.file := srcName;
+    if quietEof and (pos >= LEN(src)) then return Ccore.More; end;
+    Ccore.where^.col := colOf(ofs);
+    return Ccore.fail(msg);
+end;
+
+(* The error at the scanner's place. *)
+proc synErr(msg: []U8): ERROR;
+begin
+    return synErrAt(pos, line, msg);
+end;
+
+(* The error at the lookahead token. *)
+proc tokErr(msg: []U8): ERROR;
+begin
+    return synErrAt(tokPos, tokLine, msg);
+end;
+
+(* "unexpected 'w'". *)
+proc unexpected(w: []U8): []U8;
+begin
+    return Ccore.text("unexpected '{}'", [Fmt.str(w)]);
+end;
+
+proc toLineEnd;
+begin
+    while (ch() # 0) and (ch() # '\n') do adv; end;
+end;
+
+(* Blanks and comments, // to the end of the line and {...}; new lines
+   too if nl. *)
+proc blank(nl: BOOL): ERROR;
+begin
+    while true do
+        match ch() of
+        | ' ', '\t', '\r': adv;
+        | '\n':
+            if not nl then return nil; end;
+            adv;
+        | '\\':
+            if at(pos + 1) # '\n' then return nil; end;
+            adv;
+            adv;
+        | '/':
+            if at(pos + 1) # '/' then return nil; end;
+            toLineEnd;
+        | '{':
+            while (ch() # 0) and (ch() # '}') do adv; end;
+            if ch() = 0 then return synErr("unterminated comment"); end;
+            adv;
+        | else: return nil;
+        end;
+    end;
+end;
+
+(* A command's blanks: no new lines, and { starts a word, not a comment. *)
+proc cmdBlank;
+begin
+    while true do
+        match ch() of
+        | ' ', '\t', '\r': adv;
+        | '\\':
+            if at(pos + 1) # '\n' then return; end;
+            adv;
+            adv;
+        | '/':
+            if at(pos + 1) # '/' then return; end;
+            toLineEnd;
+        | else: return;
+        end;
+    end;
+end;
+
+(* A command's blanks, and new lines. *)
+proc nlBlank;
+begin
+    cmdBlank;
+    while ch() = '\n' do
+        adv;
+        cmdBlank;
+    end;
+end;
+
+(* The end of the name at i: i if there is none. *)
+proc identEnd(i: INT): INT;
+begin
+    if not isIdStart(at(i)) then return i; end;
+    while isIdChar(at(i)) do INC(i); end;
+    return i;
+end;
+
+(* Is the name at i k? *)
+proc wordIs(i: INT; k: []U8): BOOL;
+var e: INT;
+begin
+    e := identEnd(i);
+    return (e > i) and (src[i..e] = k);
+end;
+
+(* The keyword k next, passed if it is. *)
+proc acceptKw(k: []U8): (BOOL, ERROR);
+begin
+    try blank(true);
+    if not wordIs(pos, k) then return false, nil; end;
+    INC(pos, LEN(k));
+    return true, nil;
+end;
+
+proc expectKw(k: []U8): ERROR;
+begin
+    if not try acceptKw(k) then return synErr(Ccore.text("expected '{}'", [Fmt.str(k)])); end;
+    return nil;
+end;
+
+proc reserved(s: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(Keywords) - 1 do
+        if s = Keywords[i] then return true; end;
+    end;
+    return false;
+end;
+
+(* The builtin called name, bNone if none is. *)
+proc builtin*(name: []U8): Builtin;
+var i: INT;
+begin
+    for i := 0 to LEN(Builtins) - 1 do
+        if name = Builtins[i].name then return Builtin(i + 1); end;
+    end;
+    return bNone;
+end;
+
+(* A name, kept. *)
+proc name: ([]U8, ERROR);
+var e: INT; s: []U8;
+begin
+    try blank(false);
+    e := identEnd(pos);
+    if e = pos then return "", synErr("expected a name"); end;
+    s := src[pos..e];
+    pos := e;
+    return Ccore.perm(s), nil;
+end;
+
+(* A '...' at pos, its text added to b; '' in it is one '. If it runs to
+   the end, the error is at qPos on qLine. *)
+proc quotedInto(b: ^Buf.Buf; qPos, qLine: INT): ERROR;
+begin
+    adv;
+    while true do
+        if pos >= LEN(src) then return synErrAt(qPos, qLine, "unterminated string"); end;
+        if ch() = '\'' then
+            adv;
+            if ch() # '\'' then return nil; end;
+        end;
+        Buf.add(b, ch());
+        adv;
+    end;
+end;
+
+(* A Pascal string: quoted pieces and #codes, as in 'it''s'#10. *)
+proc pascalString: ERROR;
+var b: Buf.Buf; c: INT;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    while (ch() = '\'') or (ch() = '#') do
+        if ch() = '\'' then
+            try quotedInto(ADR(b), tokPos, tokLine);
+        else
+            adv;
+            if not isDigit(ch()) then return synErr("expected character code"); end;
+            c := 0;
+            while isDigit(ch()) do
+                c := c * 10 + INT(ch() - '0');
+                adv;
+            end;
+            Buf.add(ADR(b), U8(c));
+        end;
+    end;
+    tok := tStr;
+    tokS := Ccore.perm(Buf.bytes(ADR(b)));
+    return nil;
+end;
+
+proc one(t: Tok);
+begin
+    adv;
+    tok := t;
+end;
+
+(* The next token of an expression. *)
+proc next: ERROR;
+var e: INT; d: I64;
+begin
+    endPos := pos;
+    endLine := line;
+    try blank(true);
+    tokPos := pos;
+    tokLine := line;
+    match ch() of
+    | 0: tok := tEOF;
+    | 'a' .. 'z', 'A' .. 'Z', '_':
+        e := identEnd(pos);
+        tok := tIdent;
+        tokS := src[pos..e];
+        pos := e;
+    | '0' .. '9':
+        tokI := 0;
+        while isDigit(ch()) do
+            d := I64(ch() - '0');
+            if tokI > (Ccore.MaxI64 - d) div 10 then return tokErr("integer overflow"); end;
+            tokI := tokI * 10 + d;
+            adv;
+        end;
+        tok := tInt;
+    | '\'', '#': try pascalString();
+    | '"': one(tDStr);
+    | '`': one(tBack);
+    | ':':
+        adv;
+        tok := tColon;
+        if ch() = '=' then one(tAssign); end;
+    | '<':
+        adv;
+        tok := tLt;
+        if ch() = '=' then one(tLe);
+        elsif ch() = '>' then one(tNe);
+        end;
+    | '>':
+        adv;
+        tok := tGt;
+        if ch() = '=' then one(tGe); end;
+    | '=': one(tEq);
+    | '+': one(tPlus);
+    | '-': one(tMinus);
+    | '*': one(tStar);
+    | '(': one(tLP);
+    | ')': one(tRP);
+    | '[': one(tLB);
+    | ']': one(tRB);
+    | ',': one(tComma);
+    | ';': one(tSemi);
+    | '.': one(tDot);
+    | '/': one(tSlash);
+    | else: tok := tOther;    (* not an expression's: the caller decides *)
+    end;
+    return nil;
+end;
+
+proc tokIs(k: []U8): BOOL;
+begin
+    return (tok = tIdent) and (tokS = k);
+end;
+
+(* The token t, passed, or the error msg. *)
+proc expect(t: Tok; msg: []U8): ERROR;
+begin
+    if tok # t then return tokErr(msg); end;
+    return next();
+end;
+
+(* The lookahead given back, and the blanks before it. *)
+proc rewind;
+begin
+    pos := endPos;
+    line := endLine;
+end;
+
+(* ----------------------------------------------------- constructors *)
+
+proc newExpr(k: ExprKind): ^Expr;
+var e: ^Expr;
+begin
+    NEW(e, Heap.heap);
+    if e = nil then Rt.stop("concha: out of memory\n"); end;
+    e^.kind := k;
+    return e;
+end;
+
+(* A string literal's value, s kept as it is. *)
+proc strLit(s: []U8): Ccore.Val;
+begin
+    if LEN(s) = 0 then return {kind: Ccore.kStr}; end;
+    return {kind: Ccore.kStr, n: LEN(s), p: ADR(s[0])};
+end;
+
+(* A use of name, on line l at column c, in the refs, when outlining. *)
+proc noteRef(name: []U8; l, c: INT);
+begin
+    if outlining then Refs.push(ADR(uses), {name: name, line: l, col: c, len: LEN(name), owner: curProc}); end;
+end;
+
+(* ------------------------------------------------------ expressions *)
+
+proc expr: (^Expr, ERROR); forward;
+proc parseList: ([]^Stmt, ERROR); forward;
+
+(* A capture's statements, from after its opening ` to after its closing
+   one. *)
+proc capture: ([]^Stmt, ERROR);
+var body, none: []^Stmt; sc: Closers; si: BOOL;
+begin
+    INC(inBack);
+    sc := closers;
+    closers := {};
+    si := inSub;
+    inSub := false;
+    body := try parseList();
+    if ch() # '`' then return none, synErr("expected closing `"); end;
+    adv;
+    DEC(inBack);
+    closers := sc;
+    inSub := si;
+    return body, nil;
+end;
+
+(* <(list), from its <: parsed as a capture's list is, up to the matching
+   ), and inside it a ` opens a capture again. *)
+proc procSub: ([]^Stmt, ERROR);
+var body, none: []^Stmt; sc: Closers; sb: INT; si: BOOL;
+begin
+    adv;
+    adv;
+    sb := inBack;
+    si := inSub;
+    sc := closers;
+    inBack := 0;
+    inSub := true;
+    closers := {};
+    body := try parseList();
+    if ch() # ')' then return none, synErr("expected ) closing <("); end;
+    adv;
+    inBack := sb;
+    inSub := si;
+    closers := sc;
+    return body, nil;
+end;
+
+(* Does a <(...) start here? *)
+proc subStart: BOOL;
+begin
+    return (ch() = '<') and (at(pos + 1) = '(');
+end;
+
+(* Does the byte at i end a command's word, as a closing ` or ) may? *)
+proc endsWord(i: INT): BOOL;
+begin
+    return isWordEnd(at(i)) or (at(i) = '`') and (inBack > 0) or (at(i) = ')') and inSub;
+end;
+
+(* An expression from the scanner's place, with nothing after it read. *)
+proc exprRaw: (^Expr, ERROR);
+var e: ^Expr;
+begin
+    try next();
+    e := try expr();
+    rewind;
+    return e, nil;
+end;
+
+(* The text gathered in b, as a part at the end of l. *)
+proc addLit(l: ^Parts.Vec; b: ^Buf.Buf; quoted: BOOL);
+begin
+    Parts.push(l, {kind: ptLit, quoted: quoted, s: Ccore.perm(Buf.bytes(b))});
+    Buf.reset(b);
+end;
+
+(* A $name, ${name} or $(expression) at pos, as a part at the end of l,
+   after the text gathered in b if there is any; false, with nothing
+   read, if the $ starts none of them. *)
+proc dollar(l: ^Parts.Vec; b: ^Buf.Buf; quoted: BOOL): (BOOL, ERROR);
+var p: Part; e: INT;
+begin
+    p.quoted := quoted;
+    match at(pos + 1) of
+    | '{':
+        adv;
+        adv;
+        e := identEnd(pos);
+        if (e = pos) or (at(e) # '}') then return false, synErr("expected ${name}"); end;
+        p.kind := ptVar;
+        p.s := Ccore.perm(src[pos..e]);
+        pos := e;
+        adv;
+    | '(':
+        adv;
+        adv;
+        p.kind := ptExpr;
+        p.e := try exprRaw();
+        try blank(true);
+        if ch() # ')' then return false, synErr("expected )"); end;
+        adv;
+    | else:
+        if not isIdStart(at(pos + 1)) then return false, nil; end;
+        adv;
+        e := identEnd(pos);
+        p.kind := ptVar;
+        p.s := Ccore.perm(src[pos..e]);
+        pos := e;
+    end;
+    if b^.len > 0 then addLit(l, b, quoted); end;
+    Parts.push(l, p);
+    return true, nil;
+end;
+
+(* Up to indent blanks of a heredoc's line passed, not past limit. *)
+proc dedent(indent, limit: INT);
+var k: INT;
+begin
+    k := 0;
+    while (k < indent) and (pos < limit) and ((ch() = ' ') or (ch() = '\t')) do
+        adv;
+        INC(k);
+    end;
+end;
+
+(* Interpolated text as parts at the end of l: a "..." string's, from
+   after its opening " to after its closing one; or, if here, a heredoc's
+   body, up to limit, each line with up to indent blanks taken off. *)
+proc interpolate(l: ^Parts.Vec; here: BOOL; limit, indent: INT): ERROR;
+var b: Buf.Buf; qPos, qLine: INT; c: U8;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    qPos := pos - 1;    (* the opening ", for an error *)
+    qLine := line;
+    if here then dedent(indent, limit); end;
+    while true do
+        if here then
+            if pos >= limit then break; end;
+        elsif ch() = '"' then
+            adv;
+            break;
+        end;
+        if pos >= LEN(src) then return synErrAt(qPos, qLine, "unterminated string"); end;
+        c := ch();
+        if (c = '\\') and ((at(pos + 1) = '"') or (at(pos + 1) = '\\') or (at(pos + 1) = '$') or (at(pos + 1) = '`')) then
+            adv;
+            Buf.add(ADR(b), ch());
+            adv;
+        elsif (c # '$') or not try dollar(l, ADR(b), true) then    (* a $ that starts no part is itself *)
+            Buf.add(ADR(b), c);
+            adv;
+            if here and (c = '\n') then dedent(indent, limit); end;
+        end;
+    end;
+    if b.len > 0 then addLit(l, ADR(b), true); end;
+    return nil;
+end;
+
+(* Expressions until close, with commas between, and close passed. *)
+proc exprList(close: Tok; msg: []U8): ([]^Expr, ERROR);
+var v: Exprs.Vec;
+begin
+    Exprs.init(ADR(v), Heap.heap);
+    while tok # close do
+        Exprs.push(ADR(v), try expr());
+        if tok # tComma then break; end;
+        try next();
+    end;
+    try expect(close, msg);
+    return Exprs.all(ADR(v)), nil;
+end;
+
+proc factor: (^Expr, ERROR);
+var e, x: ^Expr; l: Parts.Vec;
+begin
+    match tok of
+    | tInt:
+        e := newExpr(eLit);
+        e^.v := Ccore.intVal(tokI);
+        try next();
+    | tStr:
+        e := newExpr(eLit);
+        e^.v := strLit(tokS);
+        try next();
+    | tDStr:
+        e := newExpr(eInterp);
+        Parts.init(ADR(l), Heap.heap);
+        try interpolate(ADR(l), false, 0, 0);
+        e^.parts := Parts.all(ADR(l));
+        try next();
+    | tBack:
+        e := newExpr(eCap);
+        e^.cap := try capture();
+        try next();
+    | tLP:
+        try next();
+        e := try expr();
+        try expect(tRP, "expected )");
+    | tLB:
+        e := newExpr(eList);
+        try next();
+        e^.args := try exprList(tRB, "expected ]");
+    | tMinus:
+        try next();
+        e := newExpr(eNeg);
+        e^.a := try factor();
+    | tIdent:
+        if tokIs("not") then
+            try next();
+            e := newExpr(eNot);
+            e^.a := try factor();
+        elsif tokIs("true") or tokIs("false") then
+            e := newExpr(eLit);
+            e^.v := Ccore.boolVal(tokIs("true"));
+            try next();
+        elsif tokIs("nil") then
+            e := newExpr(eLit);
+            try next();
+        else
+            if reserved(tokS) then return nil, tokErr(unexpected(tokS)); end;
+            e := newExpr(eVar);
+            e^.s := Ccore.perm(tokS);
+            e^.line := tokLine;
+            e^.col := colOf(tokPos);
+            try next();
+            if tok = tLP then
+                e^.kind := eCall;
+                e^.bi := builtin(e^.s);
+                if e^.bi = bNone then noteRef(e^.s, e^.line, e^.col); end;
+                try next();
+                e^.args := try exprList(tRP, "expected )");
+            end;
+        end;
+    | else: return nil, tokErr("expected an expression");
+    end;
+    while tok = tLB do
+        x := newExpr(eIndex);
+        x^.a := e;
+        try next();
+        x^.b := try expr();
+        try expect(tRB, "expected ]");
+        e := x;
+    end;
+    return e, nil;
+end;
+
+proc bin(op: Op; a, b: ^Expr): ^Expr;
+var e: ^Expr;
+begin
+    e := newExpr(eBin);
+    e^.op := op;
+    e^.a := a;
+    e^.b := b;
+    return e;
+end;
+
+proc term: (^Expr, ERROR);
+var e: ^Expr; op: Op;
+begin
+    e := try factor();
+    while true do
+        if tok = tSlash then return nil, tokErr("there is no '/', use div"); end;
+        if tok = tStar then op := oMul;
+        elsif tokIs("div") then op := oDiv;
+        elsif tokIs("mod") then op := oMod;
+        elsif tokIs("and") then op := oAnd;
+        else return e, nil;
+        end;
+        try next();
+        e := bin(op, e, try factor());
+    end;
+end;
+
+proc simple: (^Expr, ERROR);
+var e: ^Expr; op: Op;
+begin
+    e := try term();
+    while true do
+        if tok = tPlus then op := oAdd;
+        elsif tok = tMinus then op := oSub;
+        elsif tokIs("or") then op := oOr;
+        elsif tokIs("xor") then op := oXor;
+        else return e, nil;
+        end;
+        try next();
+        e := bin(op, e, try term());
+    end;
+end;
+
+proc expr: (^Expr, ERROR);
+var e: ^Expr; op: Op;
+begin
+    e := try simple();
+    match tok of
+    | tEq: op := oEq;
+    | tNe: op := oNe;
+    | tLt: op := oLt;
+    | tGt: op := oGt;
+    | tLe: op := oLe;
+    | tGe: op := oGe;
+    | else:
+        if not tokIs("in") then return e, nil; end;
+        op := oIn;
+    end;
+    try next();
+    return bin(op, e, try simple()), nil;
+end;
+
+(* ----------------------------------------------------------- words *)
+
+(* May c be in the user of ~user? *)
+proc isUserChar(c: U8): BOOL;
+begin
+    return isIdChar(c) or (c = '.') or (c = '-');
+end;
+
+(* A command's word, parsed into parts. A ~ or ~user is a home part at
+   the start of the word, and, as in sh, in a word like NAME=value right
+   after the first = or any unquoted : (PATH=~/bin:~/.local/bin). A
+   <(list) is a word of its own, a single part. *)
+proc parseWord: (Word, ERROR);
+var l: Parts.Vec; b: Buf.Buf; p: Part; e, eq, n: INT; home, here: BOOL; none: Word;
+begin
+    Parts.init(ADR(l), Heap.heap);
+    if subStart() then
+        p := {kind: ptSub};
+        p.cap := try procSub();
+        if not endsWord(pos) then return none, synErr("<(...) must be a word of its own"); end;
+        Parts.push(ADR(l), p);
+        return Parts.all(ADR(l)), nil;
+    end;
+    Buf.init(ADR(b), Ccore.temps);
+    eq := -1;    (* the = of NAME=value, if the word is one *)
+    e := identEnd(pos);
+    if (e > pos) and (at(e) = '=') then eq := e; end;
+    home := true;    (* may a ~ here start a home part? *)
+    while not isWordEnd(ch()) and not ((ch() = ')') and inSub) do
+        here := home;
+        home := false;
+        match ch() of
+        | '`':
+            if inBack > 0 then break; end;
+            adv;
+            p := {kind: ptCap};
+            p.cap := try capture();
+            Parts.push(ADR(l), p);
+        | '\'':
+            try quotedInto(ADR(b), pos, line);
+            addLit(ADR(l), ADR(b), true);
+        | '"':
+            adv;
+            n := l.len;
+            try interpolate(ADR(l), false, 0, 0);
+            if l.len = n then Parts.push(ADR(l), {kind: ptLit, quoted: true}); end;
+        | '$':
+            if not try dollar(ADR(l), ADR(b), false) then
+                Buf.add(ADR(b), '$');
+                adv;
+                addLit(ADR(l), ADR(b), false);
+            end;
+        | '\\':
+            adv;
+            if ch() = '\n' then
+                adv;
+            else
+                if pos >= LEN(src) then return none, synErr("backslash at end of input"); end;
+                Buf.add(ADR(b), ch());
+                adv;
+                addLit(ADR(l), ADR(b), true);
+            end;
+        | '~':
+            e := pos + 1;
+            while isUserChar(at(e)) do INC(e); end;
+            if here and (isWordEnd(at(e)) or (at(e) = '/') or (eq >= 0) and (at(e) = ':')) then
+                Parts.push(ADR(l), {kind: ptHome, s: Ccore.perm(src[pos + 1..e])});
+                pos := e;
+            else
+                Buf.add(ADR(b), '~');
+                adv;
+                addLit(ADR(l), ADR(b), false);
+            end;
+        | else:
+            (* plain text; in NAME=value, up to a ~ after the = or a : *)
+            while not isBareStop(ch()) and not ((ch() = ')') and inSub) and not ((ch() = '~') and (eq >= 0) and (b.len > 0) and ((pos - 1 = eq) or (at(pos - 1) = ':'))) do
+                Buf.add(ADR(b), ch());
+                adv;
+            end;
+            addLit(ADR(l), ADR(b), false);
+            home := ch() = '~';    (* only after such a stop *)
+        end;
+    end;
+    (* x<(list) is no word and a <(...) after it, but one glued to it *)
+    if subStart() then return none, synErr("<(...) must be a word of its own"); end;
+    return Parts.all(ADR(l)), nil;
+end;
+
+(* -------------------------------------------------------- commands *)
+
+proc parseStmt: (^Stmt, ERROR); forward;
+
+proc newStmt(k: StmtKind): ^Stmt;
+var s: ^Stmt;
+begin
+    NEW(s, Heap.heap);
+    if s = nil then Rt.stop("concha: out of memory\n"); end;
+    s^ := {kind: k, line: line, path: srcName};
+    return s;
+end;
+
+proc isBlank(c: U8): BOOL;
+begin
+    return (c = ' ') or (c = '\t') or (c = '\r');
+end;
+
+(* Is the name at i a bare end, else or until that closes what is open?
+   Otherwise it is a word. *)
+proc termAt(i: INT): BOOL;
+var e: INT;
+begin
+    e := identEnd(i);
+    if (e = i) or not endsWord(e) then return false; end;
+    match src[i..e] of
+    | "end": return cEnd in closers;
+    | "else": return cElse in closers;
+    | "until": return cUntil in closers;
+    | else: return false;
+    end;
+end;
+
+(* The builtin that takes no arguments named from pos to e, if it stands
+   alone, as in Pascal: writeln. Any other name alone is a command, so
+   that `ls | sort` runs sort(1). *)
+proc bareBuiltin(e: INT): Builtin;
+var b: Builtin; j: INT;
+begin
+    b := builtin(src[pos..e]);
+    if (b # bWrite) and (b # bWriteln) and (b # bHalt) then return bNone; end;
+    j := e;
+    while isBlank(at(j)) do INC(j); end;
+    match at(j) of
+    | 0, '\n', ';', '|', '<', '>': return b;
+    | else:
+    end;
+    if termAt(j) or (at(j) = '`') and (inBack > 0) or (at(j) = ')') and inSub then return b; end;
+    return bNone;
+end;
+
+(* A heredoc's tag, from after its <<, and its body, from the line after
+   this one: a tag quoted, 'tag', takes the body as it stands; otherwise
+   it is interpolated as a "..." string is. The body ends at a line that
+   is the tag, after blanks, and as many blanks are taken off each of its
+   lines. The scanner jumps over it when it comes to it. *)
+proc heredoc: (Word, ERROR);
+var tb, t: Buf.Buf; l: Parts.Vec; hs: []Here; tag: []U8; tp, i, j, k, start, ls, stop, ind, lines, sp, sl: INT; quoted, again: BOOL; none: Word;
+begin
+    cmdBlank;
+    Buf.init(ADR(tb), Ccore.temps);
+    tp := pos;
+    quoted := ch() = '\'';
+    if quoted then
+        adv;
+        while (ch() # 0) and (ch() # '\'') and (ch() # '\n') do
+            Buf.add(ADR(tb), ch());
+            adv;
+        end;
+        if ch() # '\'' then return none, synErr("unterminated heredoc tag"); end;
+        adv;
+    else
+        while not isBareStop(ch()) do
+            Buf.add(ADR(tb), ch());
+            adv;
+        end;
+    end;
+    tag := Buf.bytes(ADR(tb));
+    if LEN(tag) = 0 then return none, synErr("expected heredoc tag"); end;
+    i := pos;
+    while (i < LEN(src)) and (src[i] # '\n') do INC(i); end;
+    if i >= LEN(src) then
+        pos := LEN(src);
+        return none, synErrAt(tp, line, "missing heredoc body");
+    end;
+    (* the body starts on the next line, after any bodies there before it *)
+    start := i + 1;
+    hs := Heres.all(ADR(heres));
+    repeat
+        again := false;
+        for j := 0 to LEN(hs) - 1 do
+            if hs[j].from = start then
+                start := hs[j].upTo;
+                again := true;
+            end;
+        end;
+    until not again;
+    ls := start;    (* the start of each line, up to the tag's *)
+    while true do
+        j := ls;
+        while (j < LEN(src)) and (src[j] # '\n') do INC(j); end;
+        ind := 0;
+        while (ls + ind < j) and ((src[ls + ind] = ' ') or (src[ls + ind] = '\t')) do INC(ind); end;
+        if src[ls + ind..j] = tag then
+            stop := j + 1;
+            if stop > LEN(src) then stop := LEN(src); end;
+            break;
+        end;
+        if j >= LEN(src) then
+            pos := LEN(src);
+            return none, synErrAt(tp, line, "unterminated heredoc");
+        end;
+        ls := j + 1;
+    end;
+    lines := 0;
+    for j := start to stop - 1 do
+        if src[j] = '\n' then INC(lines); end;
+    end;
+    Heres.push(ADR(heres), {from: start, upTo: stop, lines: lines});
+    Parts.init(ADR(l), Heap.heap);
+    if quoted then
+        Buf.init(ADR(t), Ccore.temps);
+        i := start;
+        while i < ls do
+            k := 0;
+            while (k < ind) and ((src[i] = ' ') or (src[i] = '\t')) do
+                INC(i);
+                INC(k);
+            end;
+            while (i < ls) and (src[i] # '\n') do
+                Buf.add(ADR(t), src[i]);
+                INC(i);
+            end;
+            if i < ls then
+                Buf.add(ADR(t), '\n');
+                INC(i);
+            end;
+        end;
+        addLit(ADR(l), ADR(t), true);
+    else
+        sp := pos;
+        sl := line;
+        for j := pos to start - 1 do    (* the body's first line *)
+            if src[j] = '\n' then INC(line); end;
+        end;
+        pos := start;
+        try interpolate(ADR(l), true, ls, ind);
+        pos := sp;
+        line := sl;
+    end;
+    return Parts.all(ADR(l)), nil;
+end;
+
+(* Does a redirection start here: <, >, &> or a number before < or >? *)
+proc redirStart: BOOL;
+var i: INT;
+begin
+    if (ch() = '<') or (ch() = '>') or (ch() = '&') and (at(pos + 1) = '>') then return true; end;
+    i := pos;
+    while isDigit(at(i)) do INC(i); end;
+    return (i > pos) and ((at(i) = '<') or (at(i) = '>'));
+end;
+
+(* A number at pos, its digits passed. *)
+proc number: INT;
+var n: INT;
+begin
+    n := 0;
+    while isDigit(ch()) do
+        n := n * 10 + INT(ch() - '0');
+        adv;
+    end;
+    return n;
+end;
+
+proc parseRedir: (Redir, ERROR);
+var r: Redir; fd: INT;
+begin
+    fd := -1;
+    if isDigit(ch()) then fd := number(); end;
+    if ch() = '&' then    (* &> *)
+        adv;
+        adv;
+        r.kind := rBoth;
+        fd := 1;
+    elsif ch() = '<' then
+        adv;
+        if fd < 0 then fd := 0; end;
+        r.kind := rIn;
+        if ch() = '<' then
+            adv;
+            r.kind := rHere;
+            if ch() = '<' then    (* <<< *)
+                adv;
+                r.fd2 := 1;
+            else
+                r.fd := fd;
+                r.target := try heredoc();
+                return r, nil;
+            end;
+        end;
+    else
+        adv;
+        if fd < 0 then fd := 1; end;
+        r.kind := rOut;
+        if ch() = '>' then
+            adv;
+            r.kind := rApp;
+        elsif ch() = '&' then
+            adv;
+            r.kind := rDup;
+            if not isDigit(ch()) then return r, synErr("expected a descriptor after >&"); end;
+            r.fd := fd;
+            r.fd2 := number();
+            return r, nil;
+        end;
+    end;
+    r.fd := fd;
+    cmdBlank;
+    if isWordEnd(ch()) and not subStart() then return r, synErr("missing redirection target"); end;
+    r.target := try parseWord();
+    return r, nil;
+end;
+
+
+(* parseList, with only k closing it. *)
+proc listUntil(k: Closer): ([]^Stmt, ERROR);
+var l: []^Stmt; sc: Closers;
+begin
+    sc := closers;
+    closers := {k};
+    l := try parseList();
+    closers := sc;
+    return l, nil;
+end;
+
+proc parseCommand: (^Cmd, ERROR);
+var c: ^Cmd; s: ^Stmt; x: ^Expr; ws: Words.Vec; rs: Redirs.Vec; w: Word; e, wpos: INT; b: Builtin;
+begin
+    nlBlank;
+    NEW(c, Heap.heap);
+    if c = nil then Rt.stop("concha: out of memory\n"); end;
+    c^.line := line;
+    c^.path := srcName;
+    Words.init(ADR(ws), Heap.heap);
+    Redirs.init(ADR(rs), Heap.heap);
+    e := identEnd(pos);
+    if wordIs(pos, "begin") then
+        pos := e;
+        s := newStmt(sBlock);
+        s^.list := try listUntil(cEnd);
+        try expectKw("end");
+        c^.stmt := s;
+    elsif wordIs(pos, "if") or wordIs(pos, "while") or wordIs(pos, "for") or wordIs(pos, "repeat") or wordIs(pos, "case") then
+        c^.stmt := try parseStmt();
+    elsif (e > pos) and (at(e) = '(') and not reserved(src[pos..e]) then
+        try next();
+        c^.call := try factor();
+        rewind;
+    elsif e > pos then
+        b := bareBuiltin(e);
+        if b # bNone then
+            x := newExpr(eCall);
+            x^.bi := b;
+            x^.s := Ccore.perm(src[pos..e]);
+            pos := e;
+            c^.call := x;
+        end;
+    end;
+    while true do
+        cmdBlank;
+        match ch() of
+        | 0, '\n', ';': break;
+        | '|':
+            if at(pos + 1) = '&' then    (* |&: 2>&1, last, so that it follows the pipe *)
+                Redirs.push(ADR(rs), {kind: rDup, fd: 2, fd2: 1});
+            end;
+            break;
+        | '&': if at(pos + 1) # '>' then break; end;
+        | '`': if inBack > 0 then break; end;
+        | ')': if inSub then break; end;
+        | else:
+        end;
+        if termAt(pos) then break; end;
+        if (ch() = '{') and ((c^.call # nil) or (c^.stmt # nil)) then
+            try blank(false);    (* no word can follow, so a comment *)
+        elsif redirStart() and not subStart() then
+            Redirs.push(ADR(rs), try parseRedir());
+        else
+            if c^.call # nil then return nil, synErr("unexpected word after call"); end;
+            if c^.stmt # nil then return nil, synErr("unexpected word after statement"); end;
+            wpos := pos;
+            w := try parseWord();
+            (* word 0 as plain text on the command's first line: maybe a procedure's name *)
+            if (ws.len = 0) and (LEN(w) = 1) and (w[0].kind = ptLit) and (pos - wpos = LEN(w[0].s)) and (line = c^.line) then
+                noteRef(w[0].s, c^.line, colOf(wpos));
+            end;
+            Words.push(ADR(ws), w);
+        end;
+    end;
+    c^.words := Words.all(ADR(ws));
+    c^.redirs := Redirs.all(ADR(rs));
+    if (LEN(c^.words) = 0) and (c^.call = nil) and (c^.stmt = nil) and (LEN(c^.redirs) = 0) then
+        return nil, synErr("expected a command");
+    end;
+    return c, nil;
+end;
+
+(* a | b, and a |& b for a 2>&1 | b *)
+proc parsePipeline: (Pipe, ERROR);
+var v: Cmds.Vec; p: Pipe;
+begin
+    Cmds.init(ADR(v), Heap.heap);
+    Cmds.push(ADR(v), try parseCommand());
+    while true do
+        cmdBlank;
+        if (ch() # '|') or (at(pos + 1) = '|') then break; end;
+        adv;
+        if ch() = '&' then adv; end;    (* the command before took it as 2>&1 *)
+        nlBlank;
+        Cmds.push(ADR(v), try parseCommand());
+    end;
+    p.cmds := Cmds.all(ADR(v));
+    return p, nil;
+end;
+
+(* A command statement: pipelines joined by && and ||, and a & after them
+   to run them in the background. *)
+proc parseCmdStmt: (^Stmt, ERROR);
+var s: ^Stmt; v: Pipes.Vec; p: Pipe;
+begin
+    s := newStmt(sCmd);
+    Pipes.init(ADR(v), Heap.heap);
+    while true do
+        p := try parsePipeline();
+        cmdBlank;
+        if (ch() = '&') and (at(pos + 1) = '&') then p.join := jAnd;
+        elsif (ch() = '|') and (at(pos + 1) = '|') then p.join := jOr;
+        end;
+        Pipes.push(ADR(v), p);
+        if p.join = jNone then break; end;
+        adv;
+        adv;
+        nlBlank;
+    end;
+    if ch() = '&' then
+        adv;
+        s^.bg := true;
+    end;
+    s^.pipes := Pipes.all(ADR(v));
+    return s, nil;
+end;
+
+(* ------------------------------------------------------ statements *)
+
+proc parseList: ([]^Stmt, ERROR);
+var v: Stmts.Vec;
+begin
+    Stmts.init(ADR(v), Heap.heap);
+    while true do
+        try blank(true);
+        if ch() = ';' then
+            adv;
+        elsif (ch() = 0) or wordIs(pos, "end") or wordIs(pos, "until") or (ch() = '`') and (inBack > 0) or (ch() = ')') and inSub then
+            break;
+        else
+            Stmts.push(ADR(v), try parseStmt());
+        end;
+    end;
+    return Stmts.all(ADR(v)), nil;
+end;
+
+(* A type after a name, : t, passed over: concha has none. *)
+proc skipType: ERROR;
+begin
+    try blank(false);
+    if (ch() = ':') and (at(pos + 1) # '=') then
+        adv;
+        _ := try name();
+    end;
+    return nil;
+end;
+
+(* A := next, passed if it is. *)
+proc isAssign: (BOOL, ERROR);
+begin
+    try blank(false);
+    if (ch() # ':') or (at(pos + 1) # '=') then return false, nil; end;
+    adv;
+    adv;
+    return true, nil;
+end;
+
+(* s in the outline, when one is wanted; nil if not. *)
+proc note(s: ^Stmt): ^OutItem;
+var o: ^OutItem;
+begin
+    if not outlining then return nil; end;
+    NEW(o, Heap.heap);
+    if o = nil then Rt.stop("concha: out of memory\n"); end;
+    o^ := {st: s, owner: curProc};
+    if s^.kind # sProc then o^.last := s^.line; end;
+    Items.push(ADR(items), o);
+    return o;
+end;
+
+(* var or export: names, each with a type and a value if it has them. *)
+proc decls(k: StmtKind): (^Stmt, ERROR);
+var blk, s: ^Stmt; v: Stmts.Vec;
+begin
+    blk := newStmt(sBlock);
+    Stmts.init(ADR(v), Heap.heap);
+    while true do
+        s := newStmt(k);
+        try blank(false);
+        s^.col := colOf(pos);
+        s^.s := try name();
+        _ := note(s);
+        try skipType();
+        if try isAssign() then s^.e := try exprRaw(); end;
+        Stmts.push(ADR(v), s);
+        try blank(false);
+        if ch() # ',' then break; end;
+        adv;
+    end;
+    blk^.list := Stmts.all(ADR(v));
+    return blk, nil;
+end;
+
+(* A procedure or a function, from after its keyword. Its body is a block
+   of its var declarations, then the block between begin and end. *)
+proc parseProc(isFunc: BOOL): (^Stmt, ERROR);
+var s, pre, x: ^Stmt; o, up: ^OutItem; ps: Names.Vec; v: Stmts.Vec;
+begin
+    s := newStmt(sProc);
+    s^.isFunc := isFunc;
+    try blank(false);
+    s^.col := colOf(pos);
+    s^.s := try name();
+    o := note(s);
+    up := curProc;
+    curProc := o;
+    try blank(false);
+    Names.init(ADR(ps), Heap.heap);
+    if ch() = '(' then
+        adv;
+        while true do
+            try blank(true);
+            if ch() = ')' then break; end;
+            if (ch() = ',') or (ch() = ';') then
+                adv;
+            else
+                Names.push(ADR(ps), try name());
+                try skipType();
+            end;
+        end;
+        adv;
+    end;
+    s^.params := Names.all(ADR(ps));
+    try skipType();
+    try blank(true);
+    if ch() = ';' then adv; end;
+    pre := newStmt(sBlock);
+    Stmts.init(ADR(v), Heap.heap);
+    if try acceptKw("var") then
+        repeat
+            (* the names may start on the line after var, as in Pascal *)
+            try blank(true);
+            Stmts.push(ADR(v), try decls(sVar));
+            try blank(true);
+            if ch() = ';' then adv; end;
+            try blank(true);
+        until wordIs(pos, "begin") or not (isIdStart(ch()) or try acceptKw("var"));
+    end;
+    try expectKw("begin");
+    x := newStmt(sBlock);
+    x^.list := try listUntil(cEnd);
+    try expectKw("end");
+    curProc := up;
+    if o # nil then o^.last := line; end;
+    Stmts.push(ADR(v), x);
+    pre^.list := Stmts.all(ADR(v));
+    s^.body := pre;
+    return s, nil;
+end;
+
+(* A case's labels, with commas between: each an expression, or a..b. *)
+proc caseLabels: ([]^Expr, ERROR);
+var v: Exprs.Vec; l, x: ^Expr;
+begin
+    Exprs.init(ADR(v), Heap.heap);
+    while true do
+        l := try exprRaw();
+        try blank(false);
+        if (ch() = '.') and (at(pos + 1) = '.') then
+            adv;
+            adv;
+            x := newExpr(eRange);
+            x^.a := l;
+            x^.b := try exprRaw();
+            l := x;
+        end;
+        Exprs.push(ADR(v), l);
+        try blank(false);
+        if ch() # ',' then break; end;
+        adv;
+    end;
+    return Exprs.all(ADR(v)), nil;
+end;
+
+proc parseCase: (^Stmt, ERROR);
+var s: ^Stmt; a: Arm; v: Arms.Vec; sc: Closers;
+begin
+    s := newStmt(sCase);
+    s^.e := try exprRaw();
+    try expectKw("of");
+    Arms.init(ADR(v), Heap.heap);
+    while true do
+        try blank(true);
+        if ch() = ';' then
+            adv;
+        elsif try acceptKw("end") then
+            break;
+        elsif try acceptKw("else") or try acceptKw("otherwise") then
+            s^.els := newStmt(sBlock);
+            s^.els^.list := try listUntil(cEnd);
+            try expectKw("end");
+            break;
+        else
+            a.labels := try caseLabels();
+            if (ch() # ':') or (at(pos + 1) = '=') then return nil, synErr("expected : after case label"); end;
+            adv;
+            sc := closers;
+            closers := {cEnd, cElse};
+            a.body := try parseStmt();
+            closers := sc;
+            Arms.push(ADR(v), a);
+        end;
+    end;
+    s^.arms := Arms.all(ADR(v));
+    return s, nil;
+end;
+
+(* while readln(l) do writeln(l) < f: the redirection belongs to the
+   call, so the loop reads the terminal. These two spot that mistake.
+   Only a Pascal call is suspect: while readln(f) do wc -l < $f is
+   fine. *)
+proc callsReadln(e: ^Expr): BOOL;
+var i: INT;
+begin
+    if e = nil then return false; end;
+    if (e^.kind = eCall) and (e^.bi = bReadln) then return true; end;
+    for i := 0 to LEN(e^.args) - 1 do
+        if callsReadln(e^.args[i]) then return true; end;
+    end;
+    return callsReadln(e^.a) or callsReadln(e^.b);
+end;
+
+proc inputRedirected(s: ^Stmt): BOOL;
+var c: ^Cmd; i: INT;
+begin
+    if (s^.kind # sCmd) or (LEN(s^.pipes) # 1) or (LEN(s^.pipes[0].cmds) # 1) then return false; end;
+    c := s^.pipes[0].cmds[0];
+    if c^.call = nil then return false; end;
+    for i := 0 to LEN(c^.redirs) - 1 do
+        if (c^.redirs[i].fd = 0) and ((c^.redirs[i].kind = rIn) or (c^.redirs[i].kind = rHere)) then return true; end;
+    end;
+    return false;
+end;
+
+(* An assignment, x := e or x[i] := e, if one starts at pos, the name x
+   up to e; nil if none does. *)
+proc parseAssign(e: INT): (^Stmt, ERROR);
+var s: ^Stmt; j, d: INT;
+begin
+    j := e;
+    if at(j) = '[' then
+        d := 0;
+        repeat
+            if at(j) = '[' then INC(d); elsif at(j) = ']' then DEC(d); end;
+            INC(j);
+        until (d = 0) or (at(j) = 0) or (at(j) = '\n');
+    end;
+    while isBlank(at(j)) do INC(j); end;
+    if (at(j) # ':') or (at(j + 1) # '=') then return nil, nil; end;
+    s := newStmt(sAssign);
+    s^.s := Ccore.perm(src[pos..e]);
+    pos := e;
+    if ch() = '[' then
+        adv;
+        s^.e2 := try exprRaw();
+        try blank(true);
+        if ch() # ']' then return nil, synErr("expected ]"); end;
+        adv;
+    end;
+    _ := try isAssign();
+    s^.e := try exprRaw();
+    return s, nil;
+end;
+
+proc parseStmt: (^Stmt, ERROR);
+var s: ^Stmt; e, j, d: INT; sc: Closers; w: []U8;
+begin
+    try blank(true);
+    if ch() = 0 then return nil, synErr("unexpected end of input"); end;
+    e := identEnd(pos);
+    w := src[pos..e];
+    match w of
+    | "begin": return parseCmdStmt();    (* a block may feed a pipe *)
+    | "if":
+        pos := e;
+        s := newStmt(sIf);
+        s^.e := try exprRaw();
+        try expectKw("then");
+        sc := closers;
+        closers := closers + {cElse};
+        s^.body := try parseStmt();
+        closers := sc;
+        j := pos;    (* to give back if no else comes *)
+        d := line;
+        if try acceptKw("else") then
+            s^.els := try parseStmt();
+        else
+            pos := j;
+            line := d;
+        end;
+        return s, nil;
+    | "while":
+        pos := e;
+        s := newStmt(sWhile);
+        s^.e := try exprRaw();
+        try expectKw("do");
+        s^.body := try parseStmt();
+        if callsReadln(s^.e) and inputRedirected(s^.body) then
+            return nil, synErr("redirection applies to the loop body; wrap the loop in begin ... end");
+        end;
+        return s, nil;
+    | "repeat":
+        pos := e;
+        s := newStmt(sRepeat);
+        s^.body := newStmt(sBlock);
+        s^.body^.list := try listUntil(cUntil);
+        try expectKw("until");
+        s^.e := try exprRaw();
+        return s, nil;
+    | "for":
+        pos := e;
+        s := newStmt(sFor);
+        s^.s := try name();
+        if try isAssign() then
+            s^.e := try exprRaw();
+            s^.down := try acceptKw("downto");
+            if not s^.down then try expectKw("to"); end;
+            s^.e2 := try exprRaw();
+        else
+            try expectKw("in");
+            s^.kind := sForIn;
+            s^.e := try exprRaw();
+        end;
+        try expectKw("do");
+        s^.body := try parseStmt();
+        return s, nil;
+    | "case":
+        pos := e;
+        return parseCase();
+    | "var", "export":
+        pos := e;
+        if w = "var" then return decls(sVar); end;
+        return decls(sExport);
+    | "procedure", "function":
+        pos := e;
+        return parseProc(w = "function");
+    | "break", "continue":
+        pos := e;
+        if w = "break" then return newStmt(sBreak), nil; end;
+        return newStmt(sContinue), nil;
+    | "exit":
+        pos := e;
+        s := newStmt(sExit);
+        cmdBlank;
+        if ch() = '(' then s^.e := try exprRaw(); end;
+        return s, nil;
+    | "end", "else", "until", "then", "do", "of", "to", "downto", "otherwise":
+        return nil, synErr(unexpected(w));
+    | else:
+    end;
+    if e > pos then
+        s := try parseAssign(e);
+        if s # nil then return s, nil; end;
+    end;
+    return parseCmdStmt();
+end;
+
+(* ---------------------------------------------------------- parsing *)
+
+proc parseAll(text, path: []U8; more, outline: BOOL): ([]^Stmt, ERROR);
+var l, none: []^Stmt;
+begin
+    src := text;
+    srcName := Ccore.perm(path);
+    pos := 0;
+    line := 1;
+    Heres.reset(ADR(heres));
+    inBack := 0;
+    inSub := false;
+    closers := {};
+    curProc := nil;
+    quietEof := more;
+    outlining := outline;
+    if (LEN(text) >= 2) and (text[0..2] = "#!") then toLineEnd; end;
+    l := try parseList();
+    try blank(true);
+    if ch() # 0 then return none, synErr(unexpected(src[pos..identEnd(pos)])); end;
+    return l, nil;
+end;
+
+(* The statements of text, from the file path, "" if none. *)
+proc parse*(text, path: []U8): ([]^Stmt, ERROR);
+begin
+    return parseAll(text, path, false, false);
+end;
+
+(* The statements of a line typed at the prompt; More, with nothing
+   written, if it ends before what it opens does. *)
+proc parseTyped*(text: []U8): ([]^Stmt, ERROR);
+begin
+    return parseAll(text, "", true, false);
+end;
+
+(* The statements of text, with the outline and the refs noted, for -q;
+   text must stay as it is while they are read. *)
+proc parseNoted*(text, path: []U8): ([]^Stmt, ERROR);
+begin
+    return parseAll(text, path, false, true);
+end;
+
+(* The procedures and variables that parseNoted noted. *)
+proc outline*: []^OutItem;
+begin
+    return Items.all(ADR(items));
+end;
+
+(* The uses of names that parseNoted noted. *)
+proc refs*: []Ref;
+begin
+    return Refs.all(ADR(uses));
+end;
+
+(* After parseNoted failed: the procedures and functions on the lines
+   past line l in the outline too, found by their keyword at the start of
+   a line, without their parameters. *)
+proc noteProcsAfter*(l: INT);
+var s: ^Stmt; i, j, c: INT; fn: BOOL;
+begin
+    i := 0;
+    c := 1;
+    while (i < LEN(src)) and (c <= l) do
+        if src[i] = '\n' then INC(c); end;
+        INC(i);
+    end;
+    curProc := nil;
+    while i < LEN(src) do
+        j := i;
+        while isBlank(at(j)) do INC(j); end;
+        fn := wordIs(j, "function");
+        if fn or wordIs(j, "procedure") then
+            j := identEnd(j);
+            while isBlank(at(j)) do INC(j); end;
+            if isIdStart(at(j)) then
+                s := newStmt(sProc);
+                s^.line := c;
+                s^.isFunc := fn;
+                s^.col := colOf(j);
+                s^.s := Ccore.perm(src[j..identEnd(j)]);
+                _ := note(s);
+            end;
+        end;
+        while (i < LEN(src)) and (src[i] # '\n') do INC(i); end;
+        INC(i);
+        INC(c);
+    end;
+end;
+
+begin
+    Heres.init(ADR(heres), Heap.heap);
+    Items.init(ADR(items), Heap.heap);
+    Refs.init(ADR(uses), Heap.heap);
+end Csyntax.

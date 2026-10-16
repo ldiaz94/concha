@@ -14,8 +14,12 @@ before it is started, not after.
       `Ccore`'s.
 - [x] 2. `Ccore`: the arena, values, errors, output, files, the
       distance between two names.
-- [ ] 3. `Csyntax`: scanner, parser, syntax tree, and the notes the
-      queries read (`-q outline`, `words`, `def`).
+- [x] 3. `Csyntax`: scanner, parser, syntax tree, and the notes the
+      queries read (`-q outline`, `words`, `def`). The tree's lists are
+      slices; a ref holds its name and place, not the command or call.
+      Checked against the Pascal's parse of every concha script on the
+      machine and of each syntax error, by a dump of both trees, the
+      outline and the refs.
 - [ ] 4. `Cfuzzy` and `Czone`: wuzzy's matcher (`fuzzy.pas`, 120
       lines), and hora's offset and abbreviation at an instant, by
       `TZ` or `/etc/localtime` (TZif files and POSIX TZ strings; sauce's
