@@ -14,12 +14,13 @@
 #   make uninstall    exactly what install put there
 
 RAZ ?= raz
-RAZVERSION = 0.15.0
+RAZVERSION = 0.16.0
 RAZSITE = https://raz.lucelad.workers.dev
 # raz's tools, the formatter among them, lie beside its real path
 RAZTOOLS = $(dir $(realpath $(shell command -v $(RAZ))))tools
 
-ifneq "$(firstword $(subst -, ,$(word 2,$(shell $(RAZ) --version 2>/dev/null))))" "$(RAZVERSION)"
+comma := ,
+ifneq "$(firstword $(subst -, ,$(subst $(comma),,$(word 2,$(shell $(RAZ) --version 2>/dev/null)))))" "$(RAZVERSION)"
 $(warning concha is written for raz $(RAZVERSION), from $(RAZSITE); $(RAZ) is $(or $(shell $(RAZ) --version 2>/dev/null),not found))
 endif
 

@@ -7,12 +7,11 @@ One step at a time, bottom up, each committed when it compiles with
 unit does. A step that is too big to read in one sitting is split
 before it is started, not after.
 
-- [x] 1. `Ckern`: the system calls `Sys` lacks (fork, exec, `dup2`
-      and a copy above 10, signal handlers, the terminal's settings,
-      the process group, umask, resource limits, `access`, `wait4`
-      with its options). Of `kern.pas`, what `Sys` has (the terminal's
-      size and owner, `setpgid`, `chdir`, `getcwd`, the time) is
-      `Sys`'s.
+- [x] 1. `Ckern`: the system calls `Sys` lacked. raz 0.16.0 has them
+      all in `Sys` (fork, exec, `dup`, `dupTo`, `dupAbove`, `handle`
+      and `came`, a terminal's modes, `group`, umask, limits, `access`,
+      `wait` on a group), so `Ckern` is gone; its errno names are
+      `Ccore`'s.
 - [x] 2. `Ccore`: the arena, values, errors, output, files, the
       distance between two names.
 - [ ] 3. `Csyntax`: scanner, parser, syntax tree, and the notes the
@@ -22,6 +21,9 @@ before it is started, not after.
       `TZ` or `/etc/localtime` (TZif files and POSIX TZ strings; sauce's
       `Sbase` reads the offset alone).
 - [ ] 5. `Cedit`: the line editor, history, highlighting, the menu.
+      Raw mode is `Sys.rawMode`, which turns OPOST off as the Pascal
+      didn't: a new line written then is `\r\n`. The Pascal's timed
+      read for an escape sequence (VTIME 0.2 s) is `Sys.ready(fd, 200)`.
 - [ ] 6. `Cinterp`, 3,400 lines of Pascal, in four steps, each
       compiled: (a) variables, expressions, statements, procedures;
       (b) words, expansion, redirections, processes, pipes, jobs,
@@ -51,8 +53,9 @@ before it is started, not after.
   wants are made where it is called. ShortString's 255 bytes limited
   messages and names; nothing does now.
 - **Signals.** `Sys.catch` gives signals on an fd, which can't break a
-  blocking `wait4` or `read` as Ctrl-C must, so `Ckern` installs a
-  handler, as the Pascal did; a handler sets a flag with `XCHG`.
+  blocking `wait4` or `read` as Ctrl-C must, so concha uses
+  `Sys.handle`: the call a signal comes during fails with -4, and
+  `Sys.came` says which signal it was.
 
 Meant differences from the Pascal concha are listed here as they are
 made.

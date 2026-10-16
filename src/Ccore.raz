@@ -15,7 +15,7 @@
    it ends the child instead. Output is unbuffered, so that a fork
    never copies text yet to be written. *)
 module Ccore;
-import Sys, Rt, Mem, Heap, Buf, Fmt, Str, Ckern, Vals := Vec(Val);
+import Sys, Rt, Mem, Heap, Buf, Fmt, Str, Vals := Vec(Val);
 
 const
     Failed*: ERROR = "failed";
@@ -28,6 +28,26 @@ const
 
     ChunkSize = 10000H;    (* the arena's blocks, 64 KB unless one asks for more *)
     DistMax = 64;    (* the longest name distance compares *)
+
+    (* the errors concha names, by Linux's numbers *)
+    errPerm* = 1;
+    errNoEnt* = 2;
+    errIntr* = 4;
+    errNoExec* = 8;
+    errChild* = 10;
+    errAcces* = 13;
+    errExist* = 17;
+    errNotDir* = 20;
+    errIsDir* = 21;
+    errInval* = 22;
+    errMFile* = 24;
+    errNameTooLong* = 36;
+    errLoop* = 40;
+
+    (* the permissions a new file asks for, before the umask: rw------- and
+       rw-rw-rw- (octal 600 and 666) *)
+    permOwn* = 180H;
+    permAll* = 1B6H;
 
 type
     Kind* = (kNil, kBool, kInt, kStr, kList);
@@ -153,7 +173,7 @@ begin
     while LEN(s) > 0 do
         k := Sys.write(fd, s);
         if k < 0 then
-            if k # -Ckern.errIntr then return; end;
+            if k # -errIntr then return; end;
         else
             s := s[k..LEN(s)];
         end;
@@ -180,18 +200,18 @@ end;
 proc errText*(e: INT): []U8;
 begin
     match e of
-    | Ckern.errNoEnt: return "no such file or directory";
-    | Ckern.errAcces: return "permission denied";
-    | Ckern.errNotDir: return "not a directory";
-    | Ckern.errIsDir: return "is a directory";
-    | Ckern.errLoop: return "too many symbolic links";
-    | Ckern.errNameTooLong: return "file name too long";
-    | Ckern.errExist: return "file exists";
-    | Ckern.errNoExec: return "exec format error";
-    | Ckern.errMFile: return "too many open files";
-    | Ckern.errIntr: return "interrupted system call";
-    | Ckern.errInval: return "invalid argument";
-    | Ckern.errPerm: return "operation not permitted";
+    | errNoEnt: return "no such file or directory";
+    | errAcces: return "permission denied";
+    | errNotDir: return "not a directory";
+    | errIsDir: return "is a directory";
+    | errLoop: return "too many symbolic links";
+    | errNameTooLong: return "file name too long";
+    | errExist: return "file exists";
+    | errNoExec: return "exec format error";
+    | errMFile: return "too many open files";
+    | errIntr: return "interrupted system call";
+    | errInval: return "invalid argument";
+    | errPerm: return "operation not permitted";
     | else: return text("error {}", [Fmt.int(e)]);
     end;
 end;
@@ -569,7 +589,7 @@ begin
         k := Sys.read(fd, s);
         if k = 0 then break; end;
         if k > 0 then INC(b^.len, k);
-        elsif k # -Ckern.errIntr then return k;
+        elsif k # -errIntr then return k;
         end;
     end;
     return 0;
