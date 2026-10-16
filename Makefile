@@ -14,7 +14,7 @@
 #   make uninstall    exactly what install put there
 
 RAZ ?= raz
-RAZVERSION = 0.16.0
+RAZVERSION = 0.17.0
 RAZSITE = https://raz.lucelad.workers.dev
 # raz's tools, the formatter among them, lie beside its real path
 RAZTOOLS = $(dir $(realpath $(shell command -v $(RAZ))))tools

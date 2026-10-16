@@ -607,7 +607,7 @@ proc parseList: ([]^Stmt, ERROR); forward;
 (* A capture's statements, from after its opening ` to after its closing
    one. *)
 proc capture: ([]^Stmt, ERROR);
-var body, none: []^Stmt; sc: Closers; si: BOOL;
+var body: []^Stmt; sc: Closers; si: BOOL;
 begin
     INC(inBack);
     sc := closers;
@@ -615,7 +615,7 @@ begin
     si := inSub;
     inSub := false;
     body := try parseList();
-    if ch() # '`' then return none, synErr("expected closing `"); end;
+    if ch() # '`' then return [], synErr("expected closing `"); end;
     adv;
     DEC(inBack);
     closers := sc;
@@ -626,7 +626,7 @@ end;
 (* <(list), from its <: parsed as a capture's list is, up to the matching
    ), and inside it a ` opens a capture again. *)
 proc procSub: ([]^Stmt, ERROR);
-var body, none: []^Stmt; sc: Closers; sb: INT; si: BOOL;
+var body: []^Stmt; sc: Closers; sb: INT; si: BOOL;
 begin
     adv;
     adv;
@@ -637,7 +637,7 @@ begin
     inSub := true;
     closers := {};
     body := try parseList();
-    if ch() # ')' then return none, synErr("expected ) closing <("); end;
+    if ch() # ')' then return [], synErr("expected ) closing <("); end;
     adv;
     inBack := sb;
     inSub := si;
@@ -919,13 +919,13 @@ end;
    after the first = or any unquoted : (PATH=~/bin:~/.local/bin). A
    <(list) is a word of its own, a single part. *)
 proc parseWord: (Word, ERROR);
-var l: Parts.Vec; b: Buf.Buf; p: Part; e, eq, n: INT; home, here: BOOL; none: Word;
+var l: Parts.Vec; b: Buf.Buf; p: Part; e, eq, n: INT; home, here: BOOL;
 begin
     Parts.init(ADR(l), Heap.heap);
     if subStart() then
         p := {kind: ptSub};
         p.cap := try procSub();
-        if not endsWord(pos) then return none, synErr("<(...) must be a word of its own"); end;
+        if not endsWord(pos) then return [], synErr("<(...) must be a word of its own"); end;
         Parts.push(ADR(l), p);
         return Parts.all(ADR(l)), nil;
     end;
@@ -963,7 +963,7 @@ begin
             if ch() = '\n' then
                 adv;
             else
-                if pos >= LEN(src) then return none, synErr("backslash at end of input"); end;
+                if pos >= LEN(src) then return [], synErr("backslash at end of input"); end;
                 Buf.add(ADR(b), ch());
                 adv;
                 addLit(ADR(l), ADR(b), true);
@@ -990,7 +990,7 @@ begin
         end;
     end;
     (* x<(list) is no word and a <(...) after it, but one glued to it *)
-    if subStart() then return none, synErr("<(...) must be a word of its own"); end;
+    if subStart() then return [], synErr("<(...) must be a word of its own"); end;
     return Parts.all(ADR(l)), nil;
 end;
 
@@ -1051,7 +1051,7 @@ end;
    is the tag, after blanks, and as many blanks are taken off each of its
    lines. The scanner jumps over it when it comes to it. *)
 proc heredoc: (Word, ERROR);
-var tb, t: Buf.Buf; l: Parts.Vec; hs: []Here; tag: []U8; tp, i, j, k, start, ls, stop, ind, lines, sp, sl: INT; quoted, again: BOOL; none: Word;
+var tb, t: Buf.Buf; l: Parts.Vec; hs: []Here; tag: []U8; tp, i, j, k, start, ls, stop, ind, lines, sp, sl: INT; quoted, again: BOOL;
 begin
     cmdBlank;
     Buf.init(ADR(tb), Ccore.temps);
@@ -1063,7 +1063,7 @@ begin
             Buf.add(ADR(tb), ch());
             adv;
         end;
-        if ch() # '\'' then return none, synErr("unterminated heredoc tag"); end;
+        if ch() # '\'' then return [], synErr("unterminated heredoc tag"); end;
         adv;
     else
         while not isBareStop(ch()) do
@@ -1072,12 +1072,12 @@ begin
         end;
     end;
     tag := Buf.bytes(ADR(tb));
-    if LEN(tag) = 0 then return none, synErr("expected heredoc tag"); end;
+    if LEN(tag) = 0 then return [], synErr("expected heredoc tag"); end;
     i := pos;
     while (i < LEN(src)) and (src[i] # '\n') do INC(i); end;
     if i >= LEN(src) then
         pos := LEN(src);
-        return none, synErrAt(tp, line, "missing heredoc body");
+        return [], synErrAt(tp, line, "missing heredoc body");
     end;
     (* the body starts on the next line, after any bodies there before it *)
     start := i + 1;
@@ -1104,7 +1104,7 @@ begin
         end;
         if j >= LEN(src) then
             pos := LEN(src);
-            return none, synErrAt(tp, line, "unterminated heredoc");
+            return [], synErrAt(tp, line, "unterminated heredoc");
         end;
         ls := j + 1;
     end;
@@ -1690,7 +1690,7 @@ end;
 (* ---------------------------------------------------------- parsing *)
 
 proc parseAll(text, path: []U8; more, outline: BOOL): ([]^Stmt, ERROR);
-var l, none: []^Stmt;
+var l: []^Stmt;
 begin
     src := text;
     srcName := Ccore.perm(path);
@@ -1706,7 +1706,7 @@ begin
     if (LEN(text) >= 2) and (text[0..2] = "#!") then toLineEnd; end;
     l := try parseList();
     try blank(true);
-    if ch() # 0 then return none, synErr(unexpected(src[pos..identEnd(pos)])); end;
+    if ch() # 0 then return [], synErr(unexpected(src[pos..identEnd(pos)])); end;
     return l, nil;
 end;
 
