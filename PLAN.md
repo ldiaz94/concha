@@ -20,10 +20,14 @@ before it is started, not after.
       Checked against the Pascal's parse of every concha script on the
       machine and of each syntax error, by a dump of both trees, the
       outline and the refs.
-- [ ] 4. `Cfuzzy` and `Czone`: wuzzy's matcher (`fuzzy.pas`, 120
+- [x] 4. `Cfuzzy` and `Czone`: wuzzy's matcher (`fuzzy.pas`, 120
       lines), and hora's offset and abbreviation at an instant, by
       `TZ` or `/etc/localtime` (TZif files and POSIX TZ strings; sauce's
-      `Sbase` reads the offset alone).
+      `Sbase` reads the offset alone). `Czone.at(t)` reads the zone at
+      its first call, as `ZoneAt` did; hora's limits on a zone's size
+      went. Checked against fuzzy(3) on 60,000 pairs, and against hora
+      at 10,000 instants in every zone, fat and slim, and at every hour
+      of DST years in zones with footers made for it.
 - [ ] 5. `Cedit`: the line editor, history, highlighting, the menu.
       Raw mode is `Sys.rawMode`, which turns OPOST off as the Pascal
       didn't: a new line written then is `\r\n`. The Pascal's timed

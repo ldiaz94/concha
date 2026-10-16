@@ -1,0 +1,523 @@
+(* Czone: how far the local clock is ahead of UTC at an instant, and
+   what the zone calls that clock (BST, CET, +0545), for time()'s %z and
+   %Z and the hours it shows. It is hora(3)'s, the part concha used.
+
+   The offset is no rule a program can know: governments change it, and
+   did, many times. The tz database keeps the history, a file for each
+   place, in TZif (RFC 8536): the instants at which the clock changed,
+   the clock in force from each (an offset and an abbreviation), and,
+   from version 2, a footer: a POSIX TZ rule such as
+   GMT0BST,M3.5.0/1,M10.5.0 for the years after the last change listed.
+   Arch's files list every change to 2037; slim ones, zic's default,
+   stop at the last change of law and leave the rest to the rule.
+
+   The zone is the file TZ names: a path if it starts with /, else a
+   name under /usr/share/zoneinfo, a leading : dropped; with no TZ, it
+   is /etc/localtime. It is read once, at the first question. A zone
+   that can't be read, or isn't TZif, or counts leap seconds (the
+   right/ zones), is UTC.
+
+   It depends on Sys, for TZ, and on reading a file. Left out from
+   hora: dates and their formats, local time back to an instant, and
+   hora's limits on a zone's size (none comes near them). *)
+module Czone;
+import Sys, Heap, Buf, Files, Str, Times := Vec(I64), Clocks := Vec(Clock);
+
+type
+    (* A clock a zone keeps: seconds east of UTC, and its name. *)
+    Clock = record
+        off: INT;
+        abbr: []U8;
+    end;
+
+    (* When daylight time begins, or ends, each year: Jn, day n of 1 to
+       365, 29 February never counted; n, day n of 0 to 365, counting
+       it; Mm.w.d, weekday d (0 Sunday) of week w (5 the last) of month
+       m. At time, seconds after local midnight on the clock in force
+       before it, from -167 to 167 hours, so it may fall on another day
+       than the one named. *)
+    Form = (fJulian, fDay, fMonth);
+    Change = record
+        form: Form;
+        day, month, week, wday, time: INT;
+    end;
+
+    (* A POSIX TZ rule, read: a standard clock, and maybe a daylight
+       one with when each begins. *)
+    Rule = record
+        hasDst: BOOL;
+        std, dst: Clock;
+        start, stop: Change;
+    end;
+
+    Zone = record
+        trans: []I64;    (* the instants the clock changed, in order *)
+        idx: []U8;    (* the clock from each on *)
+        clocks: []Clock;
+        hasRule: BOOL;    (* the footer's, for after the last change *)
+        rule: Rule;
+    end;
+
+const
+    zoneDir = "/usr/share/zoneinfo/";
+    (* A day number fits 32 bits for 5.8 million years either way; an
+       instant beyond is UTC. *)
+    maxSecs = 185542587100800;
+    (* Years further out than this are left to the last clock listed. *)
+    ruleYears = 5000000;
+    utc: []Clock = [{off: 0, abbr: "UTC"}];
+
+var
+    zone: Zone;
+    loaded: BOOL;
+    file: Buf.Buf;    (* the zone file, kept: the abbreviations point into it *)
+    rs: []U8;    (* the rule being read, and where *)
+    rp: INT;
+
+(* --------------------------------------------------------- the calendar *)
+
+(* The day number of y-m-d, day 0 being 1970-01-01: Howard Hinnant's
+   algorithm, which counts years from 1 March, so that the leap day
+   is the last of a year. *)
+proc daysFromCivil(y, m, d: INT): INT;
+var era, yoe, doy, doe: INT;
+begin
+    if m <= 2 then DEC(y); end;
+    if y >= 0 then
+        era := y div 400;
+    else
+        era := (y - 399) div 400;
+    end;
+    yoe := y - era * 400;
+    if m > 2 then
+        doy := (153 * (m - 3) + 2) div 5 + d - 1;
+    else
+        doy := (153 * (m + 9) + 2) div 5 + d - 1;
+    end;
+    doe := yoe * 365 + yoe div 4 - yoe div 100 + doy;
+    return era * 146097 + doe - 719468;    (* 0000-03-01 to 1970-01-01 *)
+end;
+
+(* The year of day n. *)
+proc yearFromDays(n: INT): INT;
+var era, doe, yoe, doy, mp: INT;
+begin
+    n := n + 719468;
+    if n >= 0 then
+        era := n div 146097;
+    else
+        era := (n - 146096) div 146097;
+    end;
+    doe := n - era * 146097;
+    yoe := (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365;
+    doy := doe - (365 * yoe + yoe div 4 - yoe div 100);
+    mp := (5 * doy + 2) div 153;    (* 0 March to 11 February *)
+    if mp >= 10 then return yoe + era * 400 + 1; end;
+    return yoe + era * 400;
+end;
+
+(* 0 Sunday to 6 Saturday; day 0 was a Thursday. *)
+proc weekDay(n: INT): INT;
+begin
+    return (n mod 7 + 11) mod 7;
+end;
+
+(* The day of instant t, rounded down before 1970 too. *)
+proc dayOf(t: I64): INT;
+var q: I64;
+begin
+    q := t div 86400;
+    if (t < 0) and (q * 86400 # t) then DEC(q); end;
+    return INT(q);
+end;
+
+(* ----------------------------------------------------- the rule, read *)
+
+proc digit(c: U8): BOOL;
+begin
+    return (c >= '0') and (c <= '9');
+end;
+
+proc letter(c: U8): BOOL;
+begin
+    return ((c >= 'a') and (c <= 'z')) or ((c >= 'A') and (c <= 'Z'));
+end;
+
+proc peek: U8;
+begin
+    if rp < LEN(rs) then return rs[rp]; end;
+    return 0;
+end;
+
+(* A number of one to three digits, no more than most. *)
+proc number(most: INT): (INT, BOOL);
+var v, n: INT;
+begin
+    v := 0;
+    n := 0;
+    while digit(peek()) and (n < 3) do
+        v := v * 10 + INT(rs[rp]) - '0';
+        INC(rp);
+        INC(n);
+    end;
+    return v, (n > 0) and (v <= most);
+end;
+
+(* An abbreviation, kept to seven characters, as hora kept it. *)
+proc short(s: []U8): []U8;
+begin
+    if LEN(s) > 7 then return s[0..7]; end;
+    return s;
+end;
+
+(* A name: three letters or more, or <...> of letters, digits, + and -. *)
+proc name: ([]U8, BOOL);
+var b: INT;
+begin
+    if peek() = '<' then
+        INC(rp);
+        b := rp;
+        while letter(peek()) or digit(peek()) or (peek() = '+') or (peek() = '-') do INC(rp); end;
+        if (peek() # '>') or (rp - b < 3) then return [], false; end;
+        INC(rp);
+        return short(rs[b..rp - 1]), true;
+    end;
+    b := rp;
+    while letter(peek()) do INC(rp); end;
+    return short(rs[b..rp]), rp - b >= 3;
+end;
+
+(* [+-]hh[:mm[:ss]] in seconds, the hours no more than most. *)
+proc clock(most: INT): (INT, BOOL);
+var sign, h, m, s: INT; ok: BOOL;
+begin
+    sign := 1;
+    if (peek() = '+') or (peek() = '-') then
+        if peek() = '-' then sign := -1; end;
+        INC(rp);
+    end;
+    m := 0;
+    s := 0;
+    h, ok := number(most);
+    if ok and (peek() = ':') then
+        INC(rp);
+        m, ok := number(59);
+        if ok and (peek() = ':') then
+            INC(rp);
+            s, ok := number(59);
+        end;
+    end;
+    return sign * (h * 3600 + m * 60 + s), ok;
+end;
+
+(* A date and its optional /time, after a comma. *)
+proc change: (Change, BOOL);
+var c: Change; ok: BOOL;
+begin
+    c := {time: 7200};
+    if peek() = 'J' then
+        INC(rp);
+        c.form := fJulian;
+        c.day, ok := number(365);
+        if not ok or (c.day < 1) then return c, false; end;
+    elsif peek() = 'M' then
+        INC(rp);
+        c.form := fMonth;
+        c.month, ok := number(12);
+        if not ok or (c.month < 1) or (peek() # '.') then return c, false; end;
+        INC(rp);
+        c.week, ok := number(5);
+        if not ok or (c.week < 1) or (peek() # '.') then return c, false; end;
+        INC(rp);
+        c.wday, ok := number(6);
+        if not ok then return c, false; end;
+    else
+        c.form := fDay;
+        c.day, ok := number(365);
+        if not ok then return c, false; end;
+    end;
+    if peek() = '/' then
+        INC(rp);
+        c.time, ok := clock(167);
+        if not ok then return c, false; end;
+    end;
+    return c, true;
+end;
+
+(* The rule s; false if it isn't one. A rule with daylight time must
+   say when it begins and ends: zic's always do, and POSIX leaves the
+   default to each system. Offsets in a rule are west of UTC, the
+   reverse of a clock's. *)
+proc readRule(s: []U8): (Rule, BOOL);
+var r: Rule; ok: BOOL;
+begin
+    rs := s;
+    rp := 0;
+    r.std.abbr, ok := name();
+    if not ok then return r, false; end;
+    r.std.off, ok := clock(24);
+    if not ok then return r, false; end;
+    r.std.off := -r.std.off;
+    if rp = LEN(rs) then
+        r.dst := r.std;
+        return r, true;
+    end;
+    r.dst.abbr, ok := name();
+    if not ok then return r, false; end;
+    r.dst.off := r.std.off + 3600;
+    if (rp < LEN(rs)) and (rs[rp] # ',') then
+        r.dst.off, ok := clock(24);
+        if not ok then return r, false; end;
+        r.dst.off := -r.dst.off;
+    end;
+    if peek() # ',' then return r, false; end;
+    INC(rp);
+    r.start, ok := change();
+    if not ok or (peek() # ',') then return r, false; end;
+    INC(rp);
+    r.stop, ok := change();
+    r.hasDst := true;
+    return r, ok and (rp = LEN(rs));
+end;
+
+(* ---------------------------------------------------- the rule, used *)
+
+(* The day c falls on in year y. *)
+proc changeDay(c: Change; y: INT): INT;
+var first, d, next: INT;
+begin
+    first := daysFromCivil(y, 1, 1);
+    match c.form of
+    | fJulian:
+        d := first + c.day - 1;
+        (* from 1 March on, a leap year's 29 February is stepped over *)
+        if (c.day >= 60) and (daysFromCivil(y, 3, 1) - daysFromCivil(y, 2, 1) = 29) then INC(d); end;
+        return d;
+    | fDay:
+        return first + c.day;
+    | fMonth:
+        first := daysFromCivil(y, c.month, 1);
+        d := first + (c.wday - weekDay(first) + 7) mod 7 + (c.week - 1) * 7;
+        if c.week = 5 then
+            if c.month = 12 then
+                next := daysFromCivil(y + 1, 1, 1);
+            else
+                next := daysFromCivil(y, c.month + 1, 1);
+            end;
+            while d >= next do DEC(d, 7); end;
+        end;
+        return d;
+    end;
+end;
+
+(* Daylight time at t by the rule: whether it is, and false if no
+   change of the rule after the table comes at or before t, where the
+   last clock listed still holds. The changes of the year before t's,
+   its year and the year after are laid out in order, and among equal
+   instants in the order of the years: a year whose summer is the
+   whole year (EST5EDT,0/0,J365/25) ends with an autumn change at the
+   instant of next year's spring one, which is laid out last, so that
+   it is summer throughout, as zic means. *)
+proc daylight(r: ^Rule; t, tableEnd: I64): (BOOL, BOOL);
+var at: [6]I64; dst: [6]BOOL; n, y0, y, i, k: INT; when: I64; d, found: BOOL;
+begin
+    n := 0;
+    y0 := yearFromDays(dayOf(t + r^.std.off));
+    for y := y0 - 1 to y0 + 1 do
+        for k := 0 to 1 do
+            (* daylight time begins on the standard clock, and ends on its own *)
+            d := k = 0;
+            if d then
+                when := I64(changeDay(r^.start, y)) * 86400 + r^.start.time - r^.std.off;
+            else
+                when := I64(changeDay(r^.stop, y)) * 86400 + r^.stop.time - r^.dst.off;
+            end;
+            i := n;
+            while (i > 0) and (at[i - 1] > when) do
+                at[i] := at[i - 1];
+                dst[i] := dst[i - 1];
+                DEC(i);
+            end;
+            at[i] := when;
+            dst[i] := d;
+            INC(n);
+        end;
+    end;
+    d := false;
+    found := false;
+    for i := 0 to n - 1 do
+        if (at[i] > tableEnd) and (at[i] <= t) then
+            d := dst[i];
+            found := true;
+        end;
+    end;
+    return d, found;
+end;
+
+(* ------------------------------------------------------ the file, read *)
+
+(* The big-endian number of w bytes at z[at], signed. *)
+proc big(z: []U8; at, w: INT): I64;
+begin
+    if w = 4 then return I64(I32(U32(Str.be(z[at..at + 4])))); end;
+    return I64(Str.be(z[at..at + w]));
+end;
+
+(* The header at h (RFC 8536, section 3.1): "TZif", the version, 15
+   bytes kept for later, and six counts of four bytes: isutcnt,
+   isstdcnt, leapcnt, timecnt, typecnt, charcnt. The data follows it
+   (section 3.2): timecnt times of w bytes, timecnt clock indexes of a
+   byte, typecnt clocks of six bytes (a four-byte offset, a byte for
+   daylight time, a byte for where the abbreviation starts), charcnt
+   bytes of abbreviations, each ended by a zero, leapcnt leap records
+   of w + 4 bytes, and isstdcnt and isutcnt bytes of flags. Where the
+   block ends, or -1 if it isn't one concha reads. *)
+proc block(z: []U8; h, w: INT): INT;
+var isut, isstd, leap, nt, nk, nc, e: I64;
+begin
+    if (h + 44 > LEN(z)) or (z[h..h + 4] # "TZif") then return -1; end;
+    isut := big(z, h + 20, 4);
+    isstd := big(z, h + 24, 4);
+    leap := big(z, h + 28, 4);
+    nt := big(z, h + 32, 4);
+    nk := big(z, h + 36, 4);
+    nc := big(z, h + 40, 4);
+    if (isut < 0) or (isstd < 0) or (leap # 0) or (nt < 0) or (nk < 1) or (nc < 1) then return -1; end;
+    e := h + 44 + nt * (w + 1) + nk * 6 + nc + isstd + isut;
+    if e > LEN(z) then return -1; end;
+    return INT(e);
+end;
+
+(* The block at h into zone; false if it is corrupt. *)
+proc take(z: []U8; h, w: INT): BOOL;
+var nt, nk, nc, t, x, k, i, a, e: INT; trans: Times.Vec; clocks: Clocks.Vec; c: ^Clock;
+begin
+    nt := INT(big(z, h + 32, 4));
+    nk := INT(big(z, h + 36, 4));
+    nc := INT(big(z, h + 40, 4));
+    t := h + 44;
+    x := t + nt * w;    (* the indexes *)
+    k := x + nt;    (* the clocks *)
+    (* the last abbreviation ends among the characters *)
+    if z[k + nk * 6 + nc - 1] # 0 then return false; end;
+    (* the changes, each naming a clock there is, and in order *)
+    Times.init(ADR(trans), Heap.heap);
+    for i := 0 to nt - 1 do
+        Times.push(ADR(trans), big(z, t + i * w, w));
+        if z[x + i] >= nk then return false; end;
+    end;
+    zone.trans := Times.all(ADR(trans));
+    for i := 1 to nt - 1 do
+        if zone.trans[i] <= zone.trans[i - 1] then return false; end;
+    end;
+    Clocks.init(ADR(clocks), Heap.heap);
+    for i := 0 to nk - 1 do
+        c := Clocks.add(ADR(clocks));
+        c^.off := INT(big(z, k + i * 6, 4));
+        a := z[k + i * 6 + 5];
+        (* -2^31 can't be negated, so the RFC refuses it; an
+           abbreviation starts among the characters *)
+        if (c^.off = -80000000H) or (z[k + i * 6 + 4] > 1) or (a >= nc) then return false; end;
+        a := k + nk * 6 + a;
+        e := a;
+        while z[e] # 0 do INC(e); end;
+        c^.abbr := short(z[a..e]);
+    end;
+    zone.idx := z[x..x + nt];
+    zone.clocks := Clocks.all(ADR(clocks));
+    return true;
+end;
+
+(* The footer at at (section 3.3), after a version 2 block: a newline,
+   a rule, a newline. An empty rule leaves the last clock going on. *)
+proc footer(z: []U8; at: INT): BOOL;
+var i: INT; ok: BOOL;
+begin
+    if (at >= LEN(z)) or (z[at] # '\n') then return false; end;
+    i := at + 1;
+    while (i < LEN(z)) and (z[i] # '\n') do INC(i); end;
+    if i = LEN(z) then return false; end;
+    if i = at + 1 then return true; end;
+    zone.rule, ok := readRule(z[at + 1..i]);
+    zone.hasRule := ok;
+    return ok;
+end;
+
+(* The zone in the file at path; false if it isn't one. The version 1
+   block, with 32-bit times, comes first, and from version 2 the same
+   again with 64-bit times, then the footer; a file whose second block
+   or footer is cut short is refused, not read by its first. *)
+proc readZone(path: []U8): BOOL;
+var z: []U8; e, e2: INT;
+begin
+    Buf.init(ADR(file), Heap.heap);
+    if Files.load(path, ADR(file)) # 0 then return false; end;
+    z := Buf.bytes(ADR(file));
+    e := block(z, 0, 4);
+    if e < 0 then return false; end;
+    if z[4] < '2' then return take(z, 0, 4); end;
+    e2 := block(z, e, 8);
+    return (e2 >= 0) and take(z, e, 8) and footer(z, e2);
+end;
+
+proc load;
+var path: []U8; b: Buf.Buf;
+begin
+    Buf.init(ADR(b), Heap.heap);
+    path := Sys.env("TZ");
+    if LEN(path) = 0 then
+        path := "/etc/localtime";
+    elsif path[0] = ':' then
+        path := path[1..LEN(path)];
+    end;
+    if (LEN(path) > 0) and (path[0] # '/') then
+        Buf.str(ADR(b), zoneDir);
+        Buf.str(ADR(b), path);
+        path := Buf.bytes(ADR(b));
+    end;
+    if not readZone(path) then zone := {clocks: utc}; end;
+    Buf.done(ADR(b));
+    loaded := true;
+end;
+
+(* ----------------------------------------------------------- the clock *)
+
+(* The offset east of UTC, in seconds, of the local clock at t, seconds
+   since 1970, and its abbreviation: by the zone's table, and after it
+   by its rule. *)
+proc at*(t: I64): (INT, []U8);
+var lo, hi, mid, k: INT; c: Clock; tableEnd: I64; dst, found: BOOL;
+begin
+    if not loaded then load; end;
+    if (t > maxSecs) or (t < -maxSecs) then return 0, "UTC"; end;
+    (* the clock of the last change at or before t, found by halving,
+       or the first clock before them all *)
+    lo := 0;
+    hi := LEN(zone.trans);
+    while lo < hi do
+        mid := (lo + hi) div 2;
+        if zone.trans[mid] <= t then
+            lo := mid + 1;
+        else
+            hi := mid;
+        end;
+    end;
+    k := 0;
+    if lo > 0 then k := zone.idx[lo - 1]; end;
+    c := zone.clocks[k];
+    tableEnd := -maxSecs - 1;
+    if LEN(zone.trans) > 0 then tableEnd := zone.trans[LEN(zone.trans) - 1]; end;
+    if not zone.hasRule or (t < tableEnd) or (t <= -ruleYears * 31556952) or (t >= ruleYears * 31556952) then
+        return c.off, c.abbr;
+    end;
+    if not zone.rule.hasDst then return zone.rule.std.off, zone.rule.std.abbr; end;
+    dst, found := daylight(ADR(zone.rule), t, tableEnd);
+    if not found then
+        return c.off, c.abbr;
+    elsif dst then
+        return zone.rule.dst.off, zone.rule.dst.abbr;
+    end;
+    return zone.rule.std.off, zone.rule.std.abbr;
+end;
+
+end Czone.
