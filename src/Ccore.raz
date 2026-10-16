@@ -40,6 +40,7 @@ type
         n*: I64;
         p*: ^U8;
     end;
+    ValPtr = ^Val;
 
     (* Where a message says it was: the parser and the interpreter set
        these as they go. *)
@@ -295,10 +296,8 @@ end;
 
 (* A list's items, where they are. *)
 proc items*(v: Val): []Val;
-var p: ^Val;
 begin
-    p := ^Val(v.p);
-    return p[0..v.n];
+    return ValPtr(v.p)[0..v.n];
 end;
 
 (* A copy of v on the heap, items and all, for a variable to own. *)
