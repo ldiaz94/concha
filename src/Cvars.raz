@@ -1,0 +1,456 @@
+(* Cvars: the shell's variables and procedures, by name.
+
+   Two tables of variables. The globals live as long as the shell; the
+   locals are a stack of frames, one to each procedure call under way,
+   and a name is looked for in the frame on top, then among the
+   globals: a procedure sees its own locals and the globals, never its
+   caller's. A table is searched from its end, so the newest of two
+   variables of one name is the one found. A variable owns its value,
+   kept from the heap and copied on assignment (Ccore.keep).
+
+   The procedures are the script's own, the statements that define
+   them; defining one again replaces it.
+
+   Beside them, what is found from names alone: a "did you mean" for a
+   name nobody declared, the home directory of ~ and ~user (from
+   /etc/passwd, where this machine keeps its users), and the PATH that
+   commands are looked for along.
+
+   Depends on Ccore for values and errors, and on Csyntax for the
+   statements that are procedures. Left out: what runs them, which is
+   Cinterp's. *)
+module Cvars;
+import Sys, Heap, Buf, Fmt, Str, Ccore, Csyntax, Vars := Vec(Var), Procs := Vec(^Csyntax.Stmt), Names := Vec([]U8);
+
+const
+    MaxDepth = 400;    (* procedure calls under way, at most *)
+
+type
+    Var* = record
+        name*: []U8;    (* from the heap, kept for good *)
+        v*: Ccore.Val;
+        exported*: BOOL;    (* passed on to the programs the shell runs *)
+        readOnly*: BOOL;
+    end;
+
+    (* Where the stack of locals stood before a call, to stand there
+       again after it *)
+    Frame* = record
+        base, depth: INT;
+    end;
+
+    (* The closest name to a target seen so far, for "did you mean" *)
+    Best* = record
+        dist, ties: INT;
+        name: []U8;
+    end;
+
+var
+    globals, locals: Vars.Vec;
+    base: INT;    (* the first local of the frame on top *)
+    depth*: INT;    (* the procedure calls under way *)
+    procs: Procs.Vec;
+
+(* -------------------------------------------------------- variables *)
+
+(* The newest variable called name in t, from index lo on; nil if none. *)
+proc look(t: ^Vars.Vec; lo: INT; name: []U8): ^Var;
+var a: []Var; i: INT;
+begin
+    a := Vars.all(t);
+    for i := LEN(a) - 1 to lo by -1 do
+        if a[i].name = name then return ADR(a[i]); end;
+    end;
+    return nil;
+end;
+
+(* A new variable called name in t, nil; good until t next grows. *)
+proc add(t: ^Vars.Vec; name: []U8): ^Var;
+var r: ^Var;
+begin
+    r := Vars.add(t);
+    r^.name := name;
+    return r;
+end;
+
+(* The variable name means here: a local of the frame on top, else a
+   global; nil if none. *)
+proc find*(name: []U8): ^Var;
+var r: ^Var;
+begin
+    if depth > 0 then
+        r := look(ADR(locals), base, name);
+        if r # nil then return r; end;
+    end;
+    return look(ADR(globals), 0, name);
+end;
+
+(* The global called name; nil if none. *)
+proc findGlobal*(name: []U8): ^Var;
+begin
+    return look(ADR(globals), 0, name);
+end;
+
+(* The global called name, made nil if there is none. name is kept as
+   it is, so it must live as long as the shell. *)
+proc global*(name: []U8): ^Var;
+var r: ^Var;
+begin
+    r := look(ADR(globals), 0, name);
+    if r = nil then r := add(ADR(globals), name); end;
+    return r;
+end;
+
+(* A new global called name, beside any other of its name, as the
+   environment may have two. *)
+proc newGlobal*(name: []U8): ^Var;
+begin
+    return add(ADR(globals), name);
+end;
+
+(* Every global, oldest first, until one is made or unset. *)
+proc allGlobals*: []Var;
+begin
+    return Vars.all(ADR(globals));
+end;
+
+(* v kept as r's value, unless r is read-only. *)
+proc store*(r: ^Var; v: Ccore.Val): ERROR;
+var k: Ccore.Val;
+begin
+    if r^.readOnly then return Ccore.failOn(r^.name, "read-only variable"); end;
+    k := Ccore.keep(v);    (* before the old value goes: v may be part of it *)
+    Ccore.drop(r^.v);
+    r^.v := k;
+    return nil;
+end;
+
+(* name := v: the variable name means, or a new one in the frame on top,
+   or a global outside any procedure. *)
+proc assign*(name: []U8; v: Ccore.Val): ERROR;
+var r: ^Var;
+begin
+    r := find(name);
+    if r = nil then
+        if depth > 0 then r := add(ADR(locals), name); else r := add(ADR(globals), name); end;
+    end;
+    return store(r, v);
+end;
+
+(* var name := v: a variable of the frame on top, or a global outside
+   any procedure, whatever the frames below or the globals hold. *)
+proc declare*(name: []U8; v: Ccore.Val): ERROR;
+var r: ^Var;
+begin
+    if depth > 0 then
+        r := look(ADR(locals), base, name);
+        if r = nil then r := add(ADR(locals), name); end;
+    else
+        r := global(name);
+    end;
+    return store(r, v);
+end;
+
+(* r taken out of t, its value given back. *)
+proc remove(t: ^Vars.Vec; r: ^Var);
+var a: []Var; i: INT;
+begin
+    a := Vars.all(t);
+    i := r - ADR(a[0]);
+    Ccore.drop(r^.v);
+    COPY(a[i..LEN(a) - 1], a[i + 1..LEN(a)]);
+    Vars.resize(t, LEN(a) - 1);
+end;
+
+(* unset name: a local of the frame on top, else a global; nothing if
+   neither is. *)
+proc unset*(name: []U8): ERROR;
+var r: ^Var;
+begin
+    if depth > 0 then
+        r := look(ADR(locals), base, name);
+        if r # nil then
+            remove(ADR(locals), r);
+            return nil;
+        end;
+    end;
+    r := look(ADR(globals), 0, name);
+    if r = nil then return nil; end;
+    if r^.readOnly then return Ccore.failOn(name, "read-only variable"); end;
+    remove(ADR(globals), r);
+    return nil;
+end;
+
+proc setStatus*(st: INT);
+var r: ^Var;
+begin
+    r := global("status");
+    Ccore.drop(r^.v);
+    r^.v := Ccore.intVal(st);
+end;
+
+(* status, as a number; 0 if it isn't one. *)
+proc status*: INT;
+var r: ^Var; i: I64; ok: BOOL;
+begin
+    r := findGlobal("status");
+    if r = nil then return 0; end;
+    i, ok := Ccore.isNum(r^.v);
+    if not ok then return 0; end;
+    return INT(i);
+end;
+
+(* A global switch such as errexit: on only when it holds true. *)
+proc flag*(name: []U8): BOOL;
+var r: ^Var;
+begin
+    r := findGlobal(name);
+    return (r # nil) and (r^.v.kind = Ccore.kBool) and (r^.v.n # 0);
+end;
+
+(* The global name as a string; "" if there is none. A string is the
+   variable's own bytes, good until it changes. *)
+proc str*(name: []U8): []U8;
+var r: ^Var;
+begin
+    r := findGlobal(name);
+    if r = nil then return ""; end;
+    return Ccore.bytes(Ccore.toStr(r^.v));
+end;
+
+(* ------------------------------------------------------------ frames *)
+
+(* A procedure's frame, on top of the stack; what leave takes to put
+   the stack back. *)
+proc enter*: (Frame, ERROR);
+var f: Frame;
+begin
+    if depth >= MaxDepth then return f, Ccore.fail("recursion too deep"); end;
+    f := {base: base, depth: depth};
+    base := locals.len;
+    INC(depth);
+    return f, nil;
+end;
+
+(* A new variable of the frame on top, nil; good until the next is made. *)
+proc local*(name: []U8): ^Var;
+begin
+    return add(ADR(locals), name);
+end;
+
+(* The local name of the frame on top; nil if none. *)
+proc findLocal*(name: []U8): ^Var;
+begin
+    return look(ADR(locals), base, name);
+end;
+
+(* The stack as it stood at f, the variables made since given back; the
+   zero Frame is outside any procedure. *)
+proc leave*(f: Frame);
+var a: []Var; i: INT;
+begin
+    a := Vars.all(ADR(locals));
+    for i := f.base to LEN(a) - 1 do Ccore.drop(a[i].v); end;
+    Vars.resize(ADR(locals), f.base);
+    base := f.base;
+    depth := f.depth;
+end;
+
+(* The frame on top, to give leave. *)
+proc here*: Frame;
+begin
+    return {base: base, depth: depth};
+end;
+
+(* ------------------------------------------------------- procedures *)
+
+proc findProc*(name: []U8): ^Csyntax.Stmt;
+var a: []^Csyntax.Stmt; i: INT;
+begin
+    a := Procs.all(ADR(procs));
+    for i := 0 to LEN(a) - 1 do
+        if a[i]^.s = name then return a[i]; end;
+    end;
+    return nil;
+end;
+
+(* The procedure s defines, in place of any of its name. *)
+proc defineProc*(s: ^Csyntax.Stmt);
+var a: []^Csyntax.Stmt; i: INT;
+begin
+    a := Procs.all(ADR(procs));
+    for i := 0 to LEN(a) - 1 do
+        if a[i]^.s = s^.s then
+            a[i] := s;
+            return;
+        end;
+    end;
+    Procs.push(ADR(procs), s);
+end;
+
+proc allProcs*: []^Csyntax.Stmt;
+begin
+    return Procs.all(ADR(procs));
+end;
+
+(* ------------------------------------------------- "did you mean" *)
+
+proc bestInit*(b: ^Best);
+begin
+    b^ := {dist: 3FFFFFFFH};
+end;
+
+(* name, as a candidate for the target. *)
+proc consider*(b: ^Best; name, target: []U8);
+var d: INT;
+begin
+    d := Ccore.distance(target, name);
+    if d < b^.dist then
+        b^ := {dist: d, ties: 1, name: name};
+    elsif (d = b^.dist) and (name # b^.name) then
+        INC(b^.ties);
+    end;
+end;
+
+(* The one candidate closest to the target, which was n bytes long; ""
+   if none is close enough, or two are as close. *)
+proc bestName*(b: ^Best; n: INT): []U8;
+var lim: INT;
+begin
+    lim := 2;
+    if n <= 4 then lim := 1; end;
+    if (b^.ties = 1) and (b^.dist <= lim) then return b^.name; end;
+    return "";
+end;
+
+(* msg about name, with the closest of b if there is one. *)
+proc failMeaning(msg, name: []U8; b: ^Best): ERROR;
+var s: []U8;
+begin
+    s := bestName(b, LEN(name));
+    if LEN(s) = 0 then return Ccore.fail(Ccore.text("{} {}", [Fmt.str(msg), Fmt.str(name)])); end;
+    return Ccore.fail(Ccore.text("{} {}; did you mean {}?", [Fmt.str(msg), Fmt.str(name), Fmt.str(s)]));
+end;
+
+proc unknownRoutine*(name: []U8): ERROR;
+var b: Best; a: []^Csyntax.Stmt; i: INT;
+begin
+    bestInit(ADR(b));
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do consider(ADR(b), Csyntax.Builtins[i].name, name); end;
+    a := Procs.all(ADR(procs));
+    for i := 0 to LEN(a) - 1 do consider(ADR(b), a[i]^.s, name); end;
+    return failMeaning("unknown routine", name, ADR(b));
+end;
+
+proc undefined*(name: []U8): ERROR;
+var b: Best; a: []Var; i: INT;
+begin
+    bestInit(ADR(b));
+    if depth > 0 then
+        a := Vars.all(ADR(locals));
+        for i := LEN(a) - 1 to base by -1 do consider(ADR(b), a[i].name, name); end;
+    end;
+    a := Vars.all(ADR(globals));
+    for i := LEN(a) - 1 to 0 by -1 do consider(ADR(b), a[i].name, name); end;
+    return failMeaning("undefined variable", name, ADR(b));
+end;
+
+(* --------------------------------------------------- homes and PATH *)
+
+proc home*: []U8;
+begin
+    return str("HOME");
+end;
+
+(* The users in /etc/passwd, and their home directories, in the arena. *)
+proc passwd*(names, homes: ^Names.Vec);
+var b: Buf.Buf; s, l: []U8; at: [7]INT; i, f: INT; more: BOOL;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    if Ccore.readFile("/etc/passwd", ADR(b)) < 0 then return; end;
+    s := Buf.bytes(ADR(b));
+    more := true;
+    while more do
+        l, s, more := Str.cut(s, "\n");
+        f := 0;
+        for i := 0 to LEN(l) - 1 do
+            if (l[i] = ':') and (f < 6) then
+                INC(f);
+                at[f] := i + 1;
+            end;
+        end;
+        if f = 6 then
+            Names.push(names, l[0..at[1] - 1]);
+            Names.push(homes, l[at[5]..at[6] - 1]);
+        end;
+    end;
+end;
+
+(* The home directory of the user name, for ~name; false if there is
+   no such user. *)
+proc userHome*(name: []U8): ([]U8, BOOL);
+var names, homes: Names.Vec; a: [][]U8; i: INT;
+begin
+    Names.init(ADR(names), Ccore.temps);
+    Names.init(ADR(homes), Ccore.temps);
+    passwd(ADR(names), ADR(homes));
+    a := Names.all(ADR(names));
+    for i := 0 to LEN(a) - 1 do
+        if a[i] = name then return Names.all(ADR(homes))[i], true; end;
+    end;
+    return "", false;
+end;
+
+(* p, which starts with ~ or ~user, added to b with that part made the
+   home directory; false if there is no such user. *)
+proc tilde*(p: []U8; b: ^Buf.Buf): BOOL;
+var h: []U8; k: INT; ok: BOOL;
+begin
+    k := 1;
+    while (k < LEN(p)) and (p[k] # '/') do INC(k); end;
+    if k = 1 then
+        h := home();
+    else
+        h, ok := userHome(p[1..k]);
+        if not ok then return false; end;
+    end;
+    Buf.str(b, h);
+    Buf.str(b, p[k..LEN(p)]);
+    return true;
+end;
+
+(* PATH, or a sensible one when it is unset or empty. *)
+proc searchPath*: []U8;
+var p: []U8;
+begin
+    p := str("PATH");
+    if LEN(p) = 0 then return "/usr/local/bin:/usr/bin:/bin"; end;
+    return p;
+end;
+
+(* ------------------------------------------------------------ setup *)
+
+(* The environment, each NAME=value a global, exported. *)
+proc importEnv*;
+var e: []U8; r: ^Var; i, k: INT; ok: BOOL;
+begin
+    i := 0;
+    e, ok := Sys.envAt(0);
+    while ok do
+        k := 0;
+        while (k < LEN(e)) and (e[k] # '=') do INC(k); end;
+        if (k < LEN(e)) and (k > 0) then
+            r := add(ADR(globals), Ccore.perm(e[0..k]));
+            r^.v := Ccore.keep(Ccore.strVal(e[k + 1..LEN(e)]));
+            r^.exported := true;
+        end;
+        INC(i);
+        e, ok := Sys.envAt(i);
+    end;
+end;
+
+begin
+    Vars.init(ADR(globals), Heap.heap);
+    Vars.init(ADR(locals), Heap.heap);
+    Procs.init(ADR(procs), Heap.heap);
+end Cvars.

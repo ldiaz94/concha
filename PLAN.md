@@ -40,8 +40,22 @@ before it is started, not after.
       compiled: (a) variables, expressions, statements, procedures;
       (b) words, expansion, redirections, processes, pipes, jobs,
       signals and traps; (c) the builtins; (d) completion, the spec
-      files and the hooks. Where a part depends on the rest only one
-      way it becomes a module of its own; which, is decided at (a).
+      files and the hooks. The parts that depend on the rest only one
+      way are modules of their own: `Cvars`, the variables, the
+      procedures, "did you mean", `~user` and PATH; `Cglob`, patterns
+      and globbing; and `Ccomplete`, completion and the spec files,
+      which `Cinterp` imports and hands the user's `complete` function
+      as a parameter. Until a step is done, what it brings answers
+      that it is missing.
+  - [x] (a) `Cvars`, and `Cinterp`'s expressions, statements and
+        procedure calls. A call that fails gives its frame back as it
+        returns, where the Pascal left it for `Recover`. Checked
+        against the Pascal on 42 scripts of expressions, statements
+        and errors, by the globals they leave and what they say.
+  - [ ] (b) words, expansion, redirections, processes, pipes, jobs,
+        signals and traps; `Cglob`.
+  - [ ] (c) the builtins.
+  - [ ] (d) completion, the spec files and the hooks; `Ccomplete`.
 - [ ] 7. `Concha`: the command line, the REPL, startup, the queries.
       `make test` passes `tests/test.cn`.
 - [ ] 8. `doc/concha.1`, `README.md`, `doc/internals.md`: the build

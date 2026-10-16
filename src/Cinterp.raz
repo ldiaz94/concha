@@ -1,0 +1,480 @@
+(* Cinterp: the tree-walking evaluator.
+
+   Every statement marks the arena as it starts and releases it as it
+   ends, so the temporaries an expression makes die with the statement
+   that made them; a loop releases what its condition made after each
+   test. A variable owns its value (Cvars). An error is an ERROR passed
+   on with try to whoever deals with it; break, continue and exit are
+   not errors, and travel as a flag, ctl, which each list of statements
+   and each loop looks at.
+
+   Depends on Ccore for values and errors, on Csyntax for the tree, and
+   on Cvars for the variables and procedures. Commands, words and
+   captures come in step 6b of the port, the builtins in 6c; until then
+   each answers that it is missing. *)
+module Cinterp;
+import Fmt, Buf, Str, Ccore, Csyntax, Cvars, Vals := Vec(Ccore.Val);
+
+type
+    Ctl* = (cNone, cBreak, cCont, cExit);
+
+var
+    ctl*: Ctl;    (* a break, continue or exit on its way out *)
+    curFunc: ^Csyntax.Stmt;    (* the procedure running, nil outside any *)
+
+(* ---------------------------------------------- not yet ported *)
+
+proc missing(what: []U8): ERROR;
+begin
+    return Ccore.fail(Ccore.text("{} come with a later step of the port", [Fmt.str(what)]));
+end;
+
+proc runAndOr(_s: ^Csyntax.Stmt): (INT, ERROR);
+begin
+    return 0, missing("commands");
+end;
+
+proc interpolate(_parts: []Csyntax.Part): (Ccore.Val, ERROR);
+begin
+    return {}, missing("interpolated strings");
+end;
+
+proc capture(_list: []^Csyntax.Stmt): (Ccore.Val, ERROR);
+begin
+    return {}, missing("captures");
+end;
+
+proc builtin(_e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+begin
+    return {}, missing("builtins");
+end;
+
+(* ------------------------------------------------------- procedures *)
+
+proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
+proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
+
+(* The list of a's items, which stay where they are. *)
+proc listOf(a: []Ccore.Val): Ccore.Val;
+begin
+    if LEN(a) = 0 then return {kind: Ccore.kList}; end;
+    return {kind: Ccore.kList, n: LEN(a), p: ^U8(ADR(a[0]))};
+end;
+
+(* The procedure def run with args, in a frame of its own: its
+   parameters, args, the whole list, and for a function result, which
+   is what it answers. *)
+proc callProc(def: ^Csyntax.Stmt; args: []Ccore.Val): (Ccore.Val, ERROR);
+var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i: INT; err: ERROR;
+begin
+    f := try Cvars.enter();
+    up := curFunc;
+    at := Ccore.where^;
+    curFunc := def;
+    for i := 0 to LEN(def^.params) - 1 do
+        r := Cvars.local(def^.params[i]);
+        if i < LEN(args) then r^.v := Ccore.keep(args[i]); end;
+    end;
+    Cvars.local("args")^.v := Ccore.keep(listOf(args));
+    if def^.isFunc then _ := Cvars.local("result"); end;
+    err := execStmt(def^.body);
+    ctl := cNone;
+    if def^.isFunc and (err = nil) then
+        r := Cvars.findLocal("result");    (* gone if the body unset it *)
+        if r # nil then v := Ccore.temp(r^.v); end;
+    end;
+    Cvars.leave(f);
+    curFunc := up;
+    if err # nil then return {}, err; end;
+    Ccore.where^ := at;    (* an error after the call is the caller's *)
+    return v, nil;
+end;
+
+proc call(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var args: Vals.Vec; def: ^Csyntax.Stmt; i: INT;
+begin
+    if e^.bi # Csyntax.bNone then return builtin(e); end;
+    Vals.init(ADR(args), Ccore.temps);
+    for i := 0 to LEN(e^.args) - 1 do Vals.push(ADR(args), try eval(e^.args[i])); end;
+    def := Cvars.findProc(e^.s);
+    if def = nil then return {}, Cvars.unknownRoutine(e^.s); end;
+    return callProc(def, Vals.all(ADR(args)));
+end;
+
+(* ------------------------------------------------------ expressions *)
+
+(* The order of a and b, -1, 0 or 1, and false if they have none: by
+   number when either is an integer, byte by byte for two strings. *)
+proc order(a, b: Ccore.Val): (INT, BOOL);
+var i, j: I64; ia, ib: BOOL;
+begin
+    if (a.kind = Ccore.kInt) or (b.kind = Ccore.kInt) then
+        i, ia := Ccore.isNum(a);
+        j, ib := Ccore.isNum(b);
+        if ia and ib then
+            if i < j then return -1, true; end;
+            if i > j then return 1, true; end;
+            return 0, true;
+        end;
+    end;
+    if (a.kind = Ccore.kStr) and (b.kind = Ccore.kStr) then return Str.cmp(Ccore.bytes(a), Ccore.bytes(b)), true; end;
+    return 0, false;
+end;
+
+proc compare(a, b: Ccore.Val): (INT, ERROR);
+var r: INT; ok: BOOL;
+begin
+    r, ok := order(a, b);
+    if not ok then
+        return 0, Ccore.fail(Ccore.text("cannot compare {} with {}", [Fmt.str(Ccore.kindName(a.kind)), Fmt.str(Ccore.kindName(b.kind))]));
+    end;
+    return r, nil;
+end;
+
+(* Does the case label l take v? A range a..b takes a <= v <= b. *)
+proc matches(v: Ccore.Val; l: ^Csyntax.Expr): (BOOL, ERROR);
+var r: INT; ok: BOOL;
+begin
+    if l^.kind # Csyntax.eRange then return Ccore.same(v, try eval(l)), nil; end;
+    r, ok := order(v, try eval(l^.a));
+    if not ok or (r < 0) then return false, nil; end;
+    r, ok := order(v, try eval(l^.b));
+    return ok and (r <= 0), nil;
+end;
+
+(* a and b, each a list's items or a value, in one list. *)
+proc concat(a, b: Ccore.Val): Ccore.Val;
+var out: Vals.Vec; i: INT;
+begin
+    Vals.init(ADR(out), Ccore.temps);
+    if a.kind = Ccore.kList then
+        for i := 0 to INT(a.n) - 1 do Vals.push(ADR(out), Ccore.items(a)[i]); end;
+    else
+        Vals.push(ADR(out), a);
+    end;
+    if b.kind = Ccore.kList then
+        for i := 0 to INT(b.n) - 1 do Vals.push(ADR(out), Ccore.items(b)[i]); end;
+    else
+        Vals.push(ADR(out), b);
+    end;
+    return Ccore.listVal(ADR(out));
+end;
+
+(* Where sub starts in s, from 1; 0 if it doesn't. *)
+proc search(s, sub: []U8): INT;
+begin
+    return Str.find(s, sub) + 1;
+end;
+
+proc binary(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var a, b: Ccore.Val; i, j: I64; k: INT; buf: Buf.Buf; ta: BOOL;
+begin
+    if e^.op = Csyntax.oAnd then
+        if not try Ccore.truth(try eval(e^.a)) then return Ccore.boolVal(false), nil; end;
+        return Ccore.boolVal(try Ccore.truth(try eval(e^.b))), nil;
+    end;
+    if e^.op = Csyntax.oOr then
+        if try Ccore.truth(try eval(e^.a)) then return Ccore.boolVal(true), nil; end;
+        return Ccore.boolVal(try Ccore.truth(try eval(e^.b))), nil;
+    end;
+    a := try eval(e^.a);
+    b := try eval(e^.b);
+    match e^.op of
+    | oAdd:
+        if (a.kind = Ccore.kInt) and (b.kind = Ccore.kInt) then return Ccore.intVal(try Ccore.intAdd(a.n, b.n)), nil; end;
+        if (a.kind = Ccore.kList) or (b.kind = Ccore.kList) then return concat(a, b), nil; end;
+        Buf.init(ADR(buf), Ccore.temps);
+        Buf.str(ADR(buf), Ccore.bytes(Ccore.toStr(a)));
+        Buf.str(ADR(buf), Ccore.bytes(Ccore.toStr(b)));
+        return Ccore.bufVal(ADR(buf)), nil;
+    | oSub:
+        i := try Ccore.toInt(a);
+        return Ccore.intVal(try Ccore.intSub(i, try Ccore.toInt(b))), nil;
+    | oMul:
+        i := try Ccore.toInt(a);
+        return Ccore.intVal(try Ccore.intMul(i, try Ccore.toInt(b))), nil;
+    | oDiv, oMod:
+        i := try Ccore.toInt(a);
+        j := try Ccore.toInt(b);
+        if j = 0 then return {}, Ccore.fail("division by zero"); end;
+        if (j = -1) and (i = Ccore.MinI64) then    (* the one quotient too big *)
+            if e^.op = Csyntax.oDiv then return {}, Ccore.overflow(); end;
+            return Ccore.intVal(0), nil;
+        end;
+        if e^.op = Csyntax.oDiv then return Ccore.intVal(i div j), nil; end;
+        return Ccore.intVal(i mod j), nil;
+    | oXor:
+        ta := try Ccore.truth(a);
+        return Ccore.boolVal(ta # try Ccore.truth(b)), nil;
+    | oEq: return Ccore.boolVal(Ccore.same(a, b)), nil;
+    | oNe: return Ccore.boolVal(not Ccore.same(a, b)), nil;
+    | oLt: return Ccore.boolVal(try compare(a, b) < 0), nil;
+    | oGt: return Ccore.boolVal(try compare(a, b) > 0), nil;
+    | oLe: return Ccore.boolVal(try compare(a, b) <= 0), nil;
+    | oGe: return Ccore.boolVal(try compare(a, b) >= 0), nil;
+    | oIn:
+        if b.kind = Ccore.kList then
+            for k := 0 to INT(b.n) - 1 do
+                if Ccore.same(a, Ccore.items(b)[k]) then return Ccore.boolVal(true), nil; end;
+            end;
+            return Ccore.boolVal(false), nil;
+        end;
+        if b.kind = Ccore.kStr then
+            a := Ccore.toStr(a);
+            return Ccore.boolVal((a.n = 0) or (search(Ccore.bytes(b), Ccore.bytes(a)) > 0)), nil;
+        end;
+        return {}, Ccore.fail("'in' needs a list or string");
+    | else: return {}, nil;
+    end;
+end;
+
+(* A variable's value where it is, or an expression's. *)
+proc valueOf(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var r: ^Cvars.Var;
+begin
+    if e^.kind # Csyntax.eVar then return eval(e); end;
+    r := Cvars.find(e^.s);
+    if r = nil then return {}, Cvars.undefined(e^.s); end;
+    return r^.v, nil;
+end;
+
+(* a[i]: a string's ith byte, from 1, or a list's ith item, from 0;
+   read where it is, so that a loop over a list isn't quadratic. *)
+proc index(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var i: I64; v: Ccore.Val;
+begin
+    i := try Ccore.toInt(try eval(e^.b));
+    v := try valueOf(e^.a);
+    match v.kind of
+    | kStr:
+        if (i < 1) or (i > v.n) then return {}, Ccore.fail("index out of range"); end;
+        return Ccore.strVal(Ccore.bytes(v)[i - 1..i]), nil;
+    | kList:
+        if (i < 0) or (i >= v.n) then return {}, Ccore.fail("index out of range"); end;
+        return Ccore.temp(Ccore.items(v)[i]), nil;
+    | else: return {}, Ccore.fail(Ccore.text("cannot index {}", [Fmt.str(Ccore.kindName(v.kind))]));
+    end;
+end;
+
+proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+var r: ^Cvars.Var; out: Vals.Vec; i: INT;
+begin
+    match e^.kind of
+    | eLit: return e^.v, nil;
+    | eVar:
+        r := Cvars.find(e^.s);
+        if r = nil then return {}, Cvars.undefined(e^.s); end;
+        return Ccore.temp(r^.v), nil;
+    | eIndex: return index(e);
+    | eCall: return call(e);
+    | eBin: return binary(e);
+    | eNeg: return Ccore.intVal(try Ccore.intNeg(try Ccore.toInt(try eval(e^.a)))), nil;
+    | eNot: return Ccore.boolVal(not try Ccore.truth(try eval(e^.a))), nil;
+    | eList:
+        Vals.init(ADR(out), Ccore.temps);
+        for i := 0 to LEN(e^.args) - 1 do Vals.push(ADR(out), try eval(e^.args[i])); end;
+        return Ccore.listVal(ADR(out)), nil;
+    | eInterp: return interpolate(e^.parts);
+    | eCap: return capture(e^.cap);
+    | eRange: return {}, nil;
+    end;
+end;
+
+(* ------------------------------------------------------- statements *)
+
+(* x[i] := v: a list's ith item, from 0, or a string's ith byte, from 1,
+   which v must be one of. *)
+proc setIndex(s: ^Csyntax.Stmt; v: Ccore.Val): ERROR;
+var i: I64; r: ^Cvars.Var; k: Ccore.Val; it: []Ccore.Val;
+begin
+    i := try Ccore.toInt(try eval(s^.e2));
+    r := Cvars.find(s^.s);
+    if r = nil then return Cvars.undefined(s^.s); end;
+    match r^.v.kind of
+    | kList:
+        if (i < 0) or (i >= r^.v.n) then return Ccore.fail("index out of range"); end;
+        it := Ccore.items(r^.v);
+        k := Ccore.keep(v);
+        Ccore.drop(it[i]);
+        it[i] := k;
+    | kStr:
+        k := Ccore.toStr(v);
+        if (i < 1) or (i > r^.v.n) or (k.n # 1) then return Ccore.fail("bad string index assignment"); end;
+        Ccore.bytes(r^.v)[i - 1] := Ccore.bytes(k)[0];
+    | else: return Ccore.fail(Ccore.text("cannot index {}", [Fmt.str(Ccore.kindName(r^.v.kind))]));
+    end;
+    return nil;
+end;
+
+(* After a loop's body: does the loop end? A break ends it and is done
+   with; a continue is done with; an exit ends it and goes on out. *)
+proc loopDone: BOOL;
+begin
+    if ctl = cBreak then
+        ctl := cNone;
+        return true;
+    end;
+    if ctl = cCont then ctl := cNone; end;
+    return ctl # cNone;
+end;
+
+(* A loop's condition, its temporaries given back. *)
+proc test(e: ^Csyntax.Expr): (BOOL, ERROR);
+var m: Ccore.Mark; b: BOOL;
+begin
+    m := Ccore.mark();
+    b := try Ccore.truth(try eval(e));
+    Ccore.release(m);
+    return b, nil;
+end;
+
+proc execList(l: []^Csyntax.Stmt): ERROR;
+var i: INT;
+begin
+    i := 0;
+    while (i < LEN(l)) and (ctl = cNone) do
+        try execStmt(l[i]);
+        INC(i);
+    end;
+    return nil;
+end;
+
+proc execCase(s: ^Csyntax.Stmt): ERROR;
+var v: Ccore.Val; i, j: INT;
+begin
+    v := try eval(s^.e);
+    for i := 0 to LEN(s^.arms) - 1 do
+        for j := 0 to LEN(s^.arms[i].labels) - 1 do
+            if try matches(v, s^.arms[i].labels[j]) then return execStmt(s^.arms[i].body); end;
+        end;
+    end;
+    if s^.els # nil then return execStmt(s^.els); end;
+    return nil;
+end;
+
+proc execFor(s: ^Csyntax.Stmt): ERROR;
+var i, hi: I64;
+begin
+    i := try Ccore.toInt(try eval(s^.e));
+    hi := try Ccore.toInt(try eval(s^.e2));
+    while not s^.down and (i <= hi) or s^.down and (i >= hi) do
+        try Cvars.assign(s^.s, Ccore.intVal(i));
+        try execStmt(s^.body);
+        if loopDone() then break; end;
+        if i = hi then break; end;    (* never past the largest integer *)
+        if s^.down then DEC(i); else INC(i); end;
+    end;
+    return nil;
+end;
+
+proc execForIn(s: ^Csyntax.Stmt): ERROR;
+var v: Ccore.Val; it: []Ccore.Val; i: INT;
+begin
+    v := try eval(s^.e);
+    if v.kind # Ccore.kList then
+        return Ccore.fail(Ccore.text("for-in needs a list, got {}; try lines() or split()", [Fmt.str(Ccore.kindName(v.kind))]));
+    end;
+    it := Ccore.items(v);
+    for i := 0 to LEN(it) - 1 do
+        try Cvars.assign(s^.s, it[i]);
+        try execStmt(s^.body);
+        if loopDone() then break; end;
+    end;
+    return nil;
+end;
+
+proc execExport(s: ^Csyntax.Stmt): ERROR;
+var r: ^Cvars.Var; v: Ccore.Val;
+begin
+    r := Cvars.findGlobal(s^.s);
+    if s^.e # nil then
+        v := try eval(s^.e);
+        r := Cvars.global(s^.s);
+        try Cvars.store(r, v);
+    elsif r = nil then
+        r := Cvars.global(s^.s);
+        try Cvars.store(r, {kind: Ccore.kStr});
+    end;
+    r^.exported := true;
+    return nil;
+end;
+
+(* exit, or exit(e): in a function e is the result, elsewhere the
+   status. *)
+proc execExit(s: ^Csyntax.Stmt): ERROR;
+var v: Ccore.Val;
+begin
+    if s^.e # nil then
+        v := try eval(s^.e);
+        if (curFunc # nil) and curFunc^.isFunc then
+            try Cvars.assign("result", v);
+        else
+            Cvars.setStatus(INT(I32(try Ccore.toInt(v))));
+        end;
+    end;
+    ctl := cExit;
+    return nil;
+end;
+
+proc execStmt(s: ^Csyntax.Stmt): ERROR;
+var m: Ccore.Mark; v: Ccore.Val;
+begin
+    Ccore.where^.line := s^.line;
+    Ccore.where^.file := s^.path;
+    m := Ccore.mark();
+    defer Ccore.release(m);
+    match s^.kind of
+    | sCmd: _ := try runAndOr(s);
+    | sAssign:
+        v := try eval(s^.e);
+        if s^.e2 = nil then try Cvars.assign(s^.s, v); else try setIndex(s, v); end;
+    | sIf:
+        if try Ccore.truth(try eval(s^.e)) then
+            try execStmt(s^.body);
+        elsif s^.els # nil then
+            try execStmt(s^.els);
+        end;
+    | sWhile:
+        while true do    (* the test inside: see RAZ-NOTES.md, "The compiler" *)
+            if not try test(s^.e) then break; end;
+            try execStmt(s^.body);
+            if loopDone() then break; end;
+        end;
+    | sRepeat:
+        while true do
+            try execStmt(s^.body);
+            if loopDone() or try test(s^.e) then break; end;
+        end;
+    | sFor: try execFor(s);
+    | sForIn: try execForIn(s);
+    | sCase: try execCase(s);
+    | sBlock: try execList(s^.list);
+    | sVar:
+        if s^.e # nil then v := try eval(s^.e); end;
+        try Cvars.declare(s^.s, v);
+    | sExport: try execExport(s);
+    | sProc: Cvars.defineProc(s);
+    | sBreak: ctl := cBreak;
+    | sContinue: ctl := cCont;
+    | sExit: try execExit(s);
+    end;
+    return nil;
+end;
+
+(* ---------------------------------------------------------- running *)
+
+(* The program text, from the file path ("" if none), parsed and run. *)
+proc runText*(text, path: []U8): ERROR;
+begin
+    return execList(try Csyntax.parse(text, path));
+end;
+
+(* After an error: the shell as it is between statements. *)
+proc recover*;
+begin
+    Cvars.leave({});
+    curFunc := nil;
+    ctl := cNone;
+end;
+
+end Cinterp.

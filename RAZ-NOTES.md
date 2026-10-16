@@ -20,3 +20,31 @@ what was wanted, what concha does instead, and how much it cost.
   place that makes one from a `Buf` or a `Vec` tests for the empty one
   first (`bufVal`, `listVal`). Proposed as `PTR(s)` in raz's
   `PROPOSALS.md`, "A slice's pointer".
+
+## The compiler
+
+- **A `try` in a loop's condition, and another way out of its body,
+  crash it in a procedure with a `defer`.** raz 0.17.0 stops with a
+  bad address in `X64.fixLinkTo` (from `Gen.endProc`) compiling either
+  of these, `t` returning `(BOOL, ERROR)`:
+
+      proc f: ERROR;
+      begin
+          defer n := 0;
+          while try t() do _ := try t(); end;
+          return nil;
+      end;
+
+      proc g: ERROR;
+      begin
+          defer n := 0;
+          repeat
+              if n = 2 then break; end;
+          until try t();
+          return nil;
+      end;
+
+  Without the `defer` both compile, and so do `repeat _ := try t();
+  until try t();` and a `try` in an `if` of the body. `Cinterp.execStmt`
+  writes its `while` and `repeat` statements as `while true do`, the
+  test an `if` in the body; no cost.
