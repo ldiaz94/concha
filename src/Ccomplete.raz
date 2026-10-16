@@ -1,0 +1,686 @@
+(* Ccomplete: what a word being typed might become, for Tab.
+
+   A $name completes variables; a word of an expression completes
+   keywords, routines, procedures and variables; a command word
+   completes keywords, command builtins, procedures and the programs
+   along PATH. An argument asks the user's complete function first,
+   which the caller hands in (Asker); if it has no answer, the
+   command's completion file, concha-complete(5); and if there is none,
+   an argument of cd completes a directory and anything else a path.
+   When nothing starts with the word, names that hold its letters in
+   order will do, ranked by Cfuzzy, best first.
+
+   Beside it, what the shell asks of the names a command word can run:
+   is one known, and which is closest to one that isn't.
+
+   Depends on Ccore, Csyntax for the names of keywords and builtins,
+   Cvars for variables, procedures and PATH, Cglob for what a path
+   names, Cfuzzy, and Cedit for the contexts of a word. Left out: the
+   user's complete function itself, which only Cinterp can run. *)
+module Ccomplete;
+import Sys, Buf, Str, Ccore, Csyntax, Cvars, Cglob, Cfuzzy, Cedit, Vals := Vec(Ccore.Val), Names := Vec([]U8), Ints := Vec(INT);
+
+const
+    MaxSpec = 65536;    (* a bigger completion file is ignored *)
+
+type
+    (* The user's complete function, asked what the word p might become
+       after words: its answers added to ans *)
+    Asker* = proc(p: []U8; words: []Ccore.Val; ans: ^Vals.Vec);
+
+    How = (prefix, fuzzy);    (* a name starts with the word, or holds its letters in order *)
+
+    (* The names of a directory listDir offers *)
+    Show = (all, runnable, programs, dirs);    (* runnable: directories and programs *)
+
+    (* What a completion file makes of the word, beyond the words it
+       lists *)
+    Kind = (
+        kUsual,    (* there is no file: the usual rules *)
+        kFile,    (* file names too *)
+        kDir,    (* directories too *)
+        kNone,    (* the listed words alone *)
+        kCommand    (* a command line of its own starts here *)
+    );
+
+    (* What specSays reads: a file's lines, each a list of its fields,
+       and the scope, the subcommand the words have named: "-" for
+       none, "remote.add" *)
+    Spec = record
+        lines: []Ccore.Val;
+        scope: []U8;
+    end;
+
+(* Does the name nm fit what was typed, p, as how says? *)
+proc fits(nm, p: []U8; how: How): BOOL;
+begin
+    if how = prefix then return (LEN(nm) >= LEN(p)) and (nm[0..LEN(p)] = p); end;
+    return Cfuzzy.score(nm, p, Cfuzzy.exact(p)) >= 0;
+end;
+
+(* For rank: does name i of a, scored sc[i], go before name j? *)
+proc before(a: []Ccore.Val; sc: []INT; i, j: INT): BOOL;
+begin
+    if sc[i] # sc[j] then return sc[i] > sc[j]; end;
+    if a[i].n # a[j].n then return a[i].n < a[j].n; end;
+    return Str.cmp(Ccore.bytes(a[i]), Ccore.bytes(a[j])) < 0;
+end;
+
+(* out ordered best match first for p, by Cfuzzy, each name from byte
+   off on; ties go to the shorter name, then the first in byte order,
+   and repeats are dropped. *)
+proc rank(out: ^Vals.Vec; off: INT; p: []U8);
+var sv: Ints.Vec; a: []Ccore.Val; sc: []INT; v: Ccore.Val; i, j, k, t: INT; ex: BOOL;
+begin
+    a := Vals.all(out);
+    Ints.init(ADR(sv), Ccore.temps);
+    Ints.resize(ADR(sv), LEN(a));
+    sc := Ints.all(ADR(sv));
+    ex := Cfuzzy.exact(p);
+    for i := 0 to LEN(a) - 1 do
+        if a[i].n > off then sc[i] := Cfuzzy.score(Ccore.bytes(a[i])[off..a[i].n], p, ex); end;
+    end;
+    for i := 1 to LEN(a) - 1 do
+        j := i;
+        while (j > 0) and before(a, sc, j, j - 1) do
+            v := a[j];
+            a[j] := a[j - 1];
+            a[j - 1] := v;
+            t := sc[j];
+            sc[j] := sc[j - 1];
+            sc[j - 1] := t;
+            DEC(j);
+        end;
+    end;
+    k := 0;
+    for i := 0 to LEN(a) - 1 do
+        if (k = 0) or not Ccore.same(a[k - 1], a[i]) then
+            a[k] := a[i];
+            INC(k);
+        end;
+    end;
+    Vals.resize(out, k);
+end;
+
+(* Is the file f a program this user may run? *)
+proc runs(f: []U8): BOOL;
+begin
+    return (Cglob.pathKind(f) = Cglob.file) and (Sys.access(f, {Sys.executing}) = 0);
+end;
+
+(* The names in the directory from that fit base, as how says and show
+   allows, added to out as pre and the name, a directory's with a /. *)
+proc listDir(from, pre, base: []U8; show: Show; how: How; out: ^Vals.Vec);
+var d: Sys.Dir; b: Buf.Buf; nm, full: []U8; k: Cglob.Kind; ok: BOOL;
+begin
+    if Sys.openDir(ADR(d), from) # 0 then return; end;
+    nm, ok := Sys.nextEntry(ADR(d));
+    while ok do
+        if ((nm[0] # '.') or (LEN(base) > 0) and (base[0] = '.')) and fits(nm, base, how) then
+            Buf.init(ADR(b), Ccore.temps);
+            Buf.str(ADR(b), from);
+            Buf.add(ADR(b), '/');
+            Buf.str(ADR(b), nm);
+            full := Buf.bytes(ADR(b));
+            k := Cglob.pathKind(full);
+            if (show = all) or (show = dirs) and (k = Cglob.dir) or (show = programs) and runs(full)
+                    or (show = runnable) and ((k = Cglob.dir) or (Sys.access(full, {Sys.executing}) = 0)) then
+                Buf.init(ADR(b), Ccore.temps);
+                Buf.str(ADR(b), pre);
+                Buf.str(ADR(b), nm);
+                if k = Cglob.dir then Buf.add(ADR(b), '/'); end;
+                Vals.push(out, Ccore.bufVal(ADR(b)));
+            end;
+        end;
+        nm, ok := Sys.nextEntry(ADR(d));
+    end;
+    Sys.closeDir(ADR(d));
+end;
+
+(* The programs along PATH whose names fit base, as how says, added to
+   out. *)
+proc alongPath(base: []U8; how: How; out: ^Vals.Vec);
+var path, dir: []U8; more: BOOL;
+begin
+    path := Cvars.searchPath();
+    more := true;
+    while more do
+        dir, path, more := Str.cut(path, ":");
+        if LEN(dir) = 0 then dir := "."; end;
+        listDir(dir, "", base, programs, how, out);
+    end;
+end;
+
+(* The command closest to name, for a "not found" at the prompt: the
+   command builtins, the procedures and the programs along PATH, by the
+   rules of Cvars.unknownRoutine; "" if none is close enough. *)
+proc suggestCommand*(name: []U8): []U8;
+var b: Cvars.Best; progs: Vals.Vec; p: []^Csyntax.Stmt; v: []Ccore.Val; s: []U8; i: INT;
+begin
+    Cvars.bestInit(ADR(b));
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do Cvars.consider(ADR(b), Csyntax.CmdBuiltins[i].name, name); end;
+    p := Cvars.allProcs();
+    for i := 0 to LEN(p) - 1 do Cvars.consider(ADR(b), p[i]^.s, name); end;
+    Vals.init(ADR(progs), Ccore.temps);
+    alongPath("", prefix, ADR(progs));
+    v := Vals.all(ADR(progs));
+    for i := 0 to LEN(v) - 1 do Cvars.consider(ADR(b), Ccore.bytes(v[i]), name); end;
+    s := Cvars.bestName(ADR(b), LEN(name));
+    if s = name then return ""; end;    (* a program listed may still fail, with a bad #! line *)
+    return s;
+end;
+
+(* Is p something a command word can run? A builtin, a procedure, a
+   program along PATH, or with a slash, a program at that path. *)
+proc knownCommand*(p: []U8): BOOL;
+var b: Buf.Buf; m: Ccore.Mark; path, dir: []U8; i: INT; known, more: BOOL;
+begin
+    if LEN(p) = 0 then return false; end;
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do
+        if p = Csyntax.Builtins[i].name then return true; end;
+    end;
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+        if p = Csyntax.CmdBuiltins[i].name then return true; end;
+    end;
+    if Cvars.findProc(p) # nil then return true; end;
+    m := Ccore.mark();
+    Buf.init(ADR(b), Ccore.temps);
+    if Str.find(p, "/") >= 0 then
+        if (p[0] # '~') or not Cvars.tilde(p, ADR(b)) then Buf.str(ADR(b), p); end;
+        known := runs(Buf.bytes(ADR(b)));
+    else
+        path := Cvars.searchPath();
+        more := true;
+        while more and not known do
+            dir, path, more := Str.cut(path, ":");
+            if LEN(dir) = 0 then dir := "."; end;
+            Buf.reset(ADR(b));
+            Buf.str(ADR(b), dir);
+            Buf.add(ADR(b), '/');
+            Buf.str(ADR(b), p);
+            known := runs(Buf.bytes(ADR(b)));
+        end;
+    end;
+    Ccore.release(m);
+    return known;
+end;
+
+(* ------------------------------ completion files: concha-complete(5) *)
+
+(* An exported variable's value, or "". *)
+proc envVal(name: []U8): []U8;
+var r: ^Cvars.Var;
+begin
+    r := Cvars.findGlobal(name);
+    if (r = nil) or not r^.exported then return ""; end;
+    return Ccore.bytes(Ccore.toStr(r^.v));
+end;
+
+proc isBlank(c: U8): BOOL;
+begin
+    return (c = ' ') or (c = '\t') or (c = '\r');
+end;
+
+(* The lines of a completion file, each a list of its fields, added to
+   lines: blanks part them, a # starting a field ends the line, and \
+   takes the next byte as it is. Every line is kept, empty ones too, so
+   that the first is the first. *)
+proc specLines(t: []U8; lines: ^Vals.Vec);
+var f: Buf.Buf; fields: Vals.Vec; i: INT;
+begin
+    i := 0;
+    while i < LEN(t) do
+        Vals.init(ADR(fields), Ccore.temps);
+        while (i < LEN(t)) and (t[i] # '\n') do
+            if isBlank(t[i]) then
+                INC(i);
+            elsif t[i] = '#' then
+                while (i < LEN(t)) and (t[i] # '\n') do INC(i); end;
+            else
+                Buf.init(ADR(f), Ccore.temps);
+                while (i < LEN(t)) and not isBlank(t[i]) and (t[i] # '\n') do
+                    if (t[i] = '\\') and (i + 1 < LEN(t)) and (t[i + 1] # '\n') then INC(i); end;
+                    Buf.add(ADR(f), t[i]);
+                    INC(i);
+                end;
+                Vals.push(ADR(fields), Ccore.bufVal(ADR(f)));
+            end;
+        end;
+        INC(i);
+        Vals.push(lines, Ccore.listVal(ADR(fields)));
+    end;
+end;
+
+(* The file at path, if it is one this concha reads: a regular file of
+   at most MaxSpec bytes whose first line is "complete 1". *)
+proc specLoad(path: []U8; lines: ^Vals.Vec): BOOL;
+var info: Sys.Info; b: Buf.Buf; f: []Ccore.Val; err: INT;
+begin
+    info, err := Sys.info(path);
+    if (err # 0) or not info.file or (info.size > MaxSpec) then return false; end;
+    Buf.init(ADR(b), Ccore.temps);
+    if Ccore.readFile(path, ADR(b)) < 0 then return false; end;
+    Vals.init(lines, Ccore.temps);
+    specLines(Buf.bytes(ADR(b)), lines);
+    if lines^.len = 0 then return false; end;
+    f := Ccore.items(Vals.all(lines)[0]);
+    return (LEN(f) >= 2) and (Ccore.bytes(f[0]) = "complete") and (Ccore.bytes(f[1]) = "1");
+end;
+
+(* For specFind: the completion file name under the directory d, or
+   under its .local/share if local, into lines. *)
+proc under(d: []U8; local: BOOL; name: []U8; lines: ^Vals.Vec): BOOL;
+var b: Buf.Buf;
+begin
+    if (LEN(d) = 0) or (d[0] # '/') then return false; end;
+    Buf.init(ADR(b), Ccore.temps);
+    Buf.str(ADR(b), d);
+    if local then Buf.str(ADR(b), "/.local/share"); end;
+    Buf.str(ADR(b), "/concha/complete/");
+    Buf.str(ADR(b), name);
+    return specLoad(Buf.bytes(ADR(b)), lines);
+end;
+
+(* The completion file for the command cmd, by its last component:
+   under $XDG_DATA_HOME (~/.local/share), then under each directory of
+   $XDG_DATA_DIRS (/usr/local/share:/usr/share), the first that can be
+   read. A directory that isn't absolute doesn't count, as the XDG base
+   directory rules have it. *)
+proc specFind(cmd: []U8; lines: ^Vals.Vec): BOOL;
+var name, dirs, d: []U8; i: INT; more: BOOL;
+begin
+    i := LEN(cmd);
+    while (i > 0) and (cmd[i - 1] # '/') do DEC(i); end;
+    name := cmd[i..LEN(cmd)];
+    if (LEN(name) = 0) or (name = ".") or (name = "..") then return false; end;
+    dirs := envVal("XDG_DATA_HOME");
+    if LEN(dirs) > 0 then
+        if under(dirs, false, name, lines) then return true; end;
+    elsif under(envVal("HOME"), true, name, lines) then
+        return true;
+    end;
+    dirs := envVal("XDG_DATA_DIRS");
+    if LEN(dirs) = 0 then dirs := "/usr/local/share:/usr/share"; end;
+    more := true;
+    while more do
+        d, dirs, more := Str.cut(dirs, ":");
+        if under(d, false, name, lines) then return true; end;
+    end;
+    return false;
+end;
+
+proc nfields(s: ^Spec; l: INT): INT;
+begin
+    return INT(s^.lines[l].n);
+end;
+
+(* Field k of line l, "" past its end. *)
+proc fld(s: ^Spec; l, k: INT): []U8;
+begin
+    if k >= nfields(s, l) then return ""; end;
+    return Ccore.bytes(Ccore.items(s^.lines[l])[k]);
+end;
+
+proc fldIs(s: ^Spec; l, k: INT; q: []U8): BOOL;
+begin
+    return (k < nfields(s, l)) and (fld(s, l, k) = q);
+end;
+
+(* Is line l a kw line of the scope, with at least nf fields? *)
+proc scoped(s: ^Spec; l: INT; kw: []U8; nf: INT): BOOL;
+begin
+    return (nfields(s, l) >= nf) and (fld(s, l, 0) = kw) and fldIs(s, l, 1, s^.scope);
+end;
+
+(* Is line l a well-formed opt line of the scope: a letter or -, and a
+   name without dashes or -? *)
+proc isOpt(s: ^Spec; l: INT): BOOL;
+var o: []U8;
+begin
+    if not scoped(s, l, "opt", 4) or (LEN(fld(s, l, 2)) # 1) then return false; end;
+    o := fld(s, l, 3);
+    return (o = "-") or (o[0] # '-');
+end;
+
+(* The name q added to ans, led by the first skip bytes of p. *)
+proc offer1(ans: ^Vals.Vec; p: []U8; skip: INT; q: []U8);
+var b: Buf.Buf;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    Buf.str(ADR(b), p[0..skip]);
+    Buf.str(ADR(b), q);
+    Vals.push(ans, Ccore.bufVal(ADR(b)));
+end;
+
+(* The scope's option with the letter c; -1 if none. *)
+proc short(s: ^Spec; c: U8): INT;
+var l: INT;
+begin
+    for l := 1 to LEN(s^.lines) - 1 do
+        if isOpt(s, l) and (fld(s, l, 2)[0] = c) and (c # '-') then return l; end;
+    end;
+    return -1;
+end;
+
+(* The scope's option with the long name q; -1 if none. *)
+proc long(s: ^Spec; q: []U8): INT;
+var l: INT;
+begin
+    for l := 1 to LEN(s^.lines) - 1 do
+        if isOpt(s, l) and fldIs(s, l, 3, q) and (q # "-") then return l; end;
+    end;
+    return -1;
+end;
+
+proc isSub(s: ^Spec; v: []U8): BOOL;
+var l, k: INT;
+begin
+    for l := 1 to LEN(s^.lines) - 1 do
+        if scoped(s, l, "sub", 3) then
+            for k := 2 to nfields(s, l) - 1 do
+                if fldIs(s, l, k, v) then return true; end;
+            end;
+        end;
+    end;
+    return false;
+end;
+
+(* The arg line for the scope's mth operand; -1 if none. *)
+proc operand(s: ^Spec; m: INT): INT;
+var f: []U8; l, k, x: INT;
+begin
+    for l := 1 to LEN(s^.lines) - 1 do
+        if scoped(s, l, "arg", 4) then
+            f := fld(s, l, 2);
+            x := 0;
+            k := 0;
+            while (k < LEN(f)) and (f[k] >= '0') and (f[k] <= '9') and (x < 100000) do
+                x := x * 10 + INT(f[k]) - '0';
+                INC(k);
+            end;
+            if (LEN(f) > 0) and (k = LEN(f)) and (x = m) then return l; end;
+        end;
+    end;
+    return -1;
+end;
+
+proc nameStart(c: U8): BOOL;
+begin
+    return (c >= 'A') and (c <= 'Z') or (c >= 'a') and (c <= 'z') or (c = '_');
+end;
+
+(* The names in the directory field k of line l names, with ~ and
+   $NAME, braced or not, taken from the environment; nothing if one of
+   them is unset. They go into ans as offer1 puts them, those starting
+   with a dot only if p does after its first skip bytes. *)
+proc dirNames(s: ^Spec; l, k: INT; ans: ^Vals.Vec; p: []U8; skip: INT);
+var dd: Sys.Dir; d: Buf.Buf; f, v, nm: []U8; i, j: INT; dot, ok: BOOL;
+begin
+    if k >= nfields(s, l) then return; end;
+    f := fld(s, l, k);
+    Buf.init(ADR(d), Ccore.temps);
+    i := 0;
+    if (LEN(f) > 0) and (f[0] = '~') and ((LEN(f) = 1) or (f[1] = '/')) then
+        v := envVal("HOME");
+        if LEN(v) = 0 then return; end;
+        Buf.str(ADR(d), v);
+        i := 1;
+    end;
+    while i < LEN(f) do
+        if (f[i] = '$') and (i + 1 < LEN(f)) and (nameStart(f[i + 1]) or (f[i + 1] = '{')) then
+            INC(i);
+            if f[i] = '{' then
+                j := i + 1;
+                while (j < LEN(f)) and (f[j] # '}') do INC(j); end;
+                if j = LEN(f) then return; end;    (* a brace not closed *)
+                v := envVal(f[i + 1..j]);
+                i := j + 1;
+            else
+                j := i;
+                while (j < LEN(f)) and (nameStart(f[j]) or (f[j] >= '0') and (f[j] <= '9')) do INC(j); end;
+                v := envVal(f[i..j]);
+                i := j;
+            end;
+            if LEN(v) = 0 then return; end;
+            Buf.str(ADR(d), v);
+        else
+            Buf.add(ADR(d), f[i]);
+            INC(i);
+        end;
+    end;
+    if Sys.openDir(ADR(dd), Buf.bytes(ADR(d))) # 0 then return; end;
+    dot := (LEN(p) > skip) and (p[skip] = '.');
+    nm, ok := Sys.nextEntry(ADR(dd));
+    while ok do
+        if (nm[0] # '.') or dot then offer1(ans, p, skip, nm); end;
+        nm, ok := Sys.nextEntry(ADR(dd));
+    end;
+    Sys.closeDir(ADR(dd));
+end;
+
+(* The kind line l gives from field k on; one and in add to ans. *)
+proc argKind(s: ^Spec; l, k: INT; ans: ^Vals.Vec; p: []U8; skip: INT): Kind;
+var i: INT;
+begin
+    if fldIs(s, l, k, "dir") then return kDir; end;
+    if fldIs(s, l, k, "word") then return kNone; end;
+    if fldIs(s, l, k, "command") then return kCommand; end;
+    if fldIs(s, l, k, "one") then
+        for i := k + 1 to nfields(s, l) - 1 do offer1(ans, p, skip, fld(s, l, i)); end;
+        return kNone;
+    end;
+    if fldIs(s, l, k, "in") then
+        dirNames(s, l, k + 1, ans, p, skip);
+        return kNone;
+    end;
+    return kFile;
+end;
+
+(* What the completion file in lines says the word p may become after
+   words: names to offer go into ans, each led by the first skip bytes
+   of p (an option's --name=), and the kind says what else. For
+   kCommand, at is where in words the command line of its own starts,
+   LEN(words) if at p. *)
+proc specSays(lines: []Ccore.Val; words: []Ccore.Val; p: []U8; ans: ^Vals.Vec): (Kind, INT, INT);
+var s: Spec; b: Buf.Buf; w: []U8; count, pend, i, j, li, skip: INT; dashes: BOOL;
+begin
+    s := {lines: lines, scope: "-"};
+    pend := -1;
+    (* the words before p: where they leave the scope and the operands *)
+    for i := 1 to LEN(words) - 1 do
+        w := Ccore.bytes(Ccore.toStr(words[i]));
+        if pend >= 0 then
+            if fldIs(ADR(s), pend, 4, "command") then return kCommand, i, 0; end;
+            pend := -1;
+        elsif not dashes and (w = "--") then
+            dashes := true;
+        elsif not dashes and (LEN(w) > 1) and (w[0] = '-') then
+            if w[1] = '-' then
+                li := long(ADR(s), w[2..LEN(w)]);
+                if (Str.find(w, "=") < 0) and (li >= 0) and (nfields(ADR(s), li) > 4) then pend := li; end;
+            else
+                for j := 1 to LEN(w) - 1 do
+                    li := short(ADR(s), w[j]);
+                    if (li >= 0) and (nfields(ADR(s), li) > 4) then
+                        if j = LEN(w) - 1 then pend := li; end;    (* else the rest is its value *)
+                        break;
+                    end;
+                end;
+            end;
+        elsif not dashes and (count = 0) and isSub(ADR(s), w) then
+            if s.scope = "-" then
+                s.scope := w;
+            else
+                Buf.init(ADR(b), Ccore.temps);
+                Buf.str(ADR(b), s.scope);
+                Buf.add(ADR(b), '.');
+                Buf.str(ADR(b), w);
+                s.scope := Buf.bytes(ADR(b));
+            end;
+        else
+            INC(count);
+            li := operand(ADR(s), count);
+            if (li >= 0) and fldIs(ADR(s), li, 3, "command") then return kCommand, i, 0; end;
+        end;
+    end;
+    (* the word itself *)
+    if pend >= 0 then return argKind(ADR(s), pend, 4, ans, p, 0), LEN(words), 0; end;
+    if not dashes and (LEN(p) > 2) and (p[0..2] = "--") then
+        j := 2;
+        while (j < LEN(p)) and (p[j] # '=') do INC(j); end;
+        if j < LEN(p) then
+            skip := j + 1;
+            li := long(ADR(s), p[2..j]);
+            if (li >= 0) and (nfields(ADR(s), li) > 4) then return argKind(ADR(s), li, 4, ans, p, skip), LEN(words), skip; end;
+            return kNone, LEN(words), skip;
+        end;
+    end;
+    if not dashes and (LEN(p) > 0) and (p[0] = '-') then
+        for li := 1 to LEN(lines) - 1 do
+            if isOpt(ADR(s), li) then
+                w := fld(ADR(s), li, 3);
+                if w # "-" then offer1(ans, "--", 2, w); end;
+                w := fld(ADR(s), li, 2);
+                if w[0] # '-' then offer1(ans, "-", 1, w); end;
+            end;
+        end;
+        return kNone, LEN(words), 0;
+    end;
+    if not dashes and (count = 0) then
+        for li := 1 to LEN(lines) - 1 do
+            if scoped(ADR(s), li, "sub", 3) then
+                for j := 2 to nfields(ADR(s), li) - 1 do Vals.push(ans, Ccore.items(lines[li])[j]); end;
+            end;
+        end;
+    end;
+    li := operand(ADR(s), count + 1);
+    if li < 0 then return kFile, LEN(words), 0; end;
+    return argKind(ADR(s), li, 3, ans, p, 0), LEN(words), 0;
+end;
+
+(* -------------------------------------------------------- completion *)
+
+(* q added to out if it fits p as how says. *)
+proc offer(q, p: []U8; how: How; out: ^Vals.Vec);
+begin
+    if fits(q, p, how) then Vals.push(out, Ccore.strVal(q)); end;
+end;
+
+(* What p might become in the context cx, added to out: the answers in
+   ans first, then, unless a complete function gave them or the kind is
+   kNone, the names that fit as how says. How many bytes of p the names
+   leave out. *)
+proc gather(p: []U8; cx: Cedit.Context; how: How; kind: Kind; given: BOOL; ans: []Ccore.Val; out: ^Vals.Vec): INT;
+var b: Buf.Buf; names, homes: Names.Vec; g: []Cvars.Var; procs: []^Csyntax.Stmt; nm: [][]U8; i, s: INT; show: Show;
+begin
+    (* a complete function's words stand alone; a file's may not *)
+    for i := 0 to LEN(ans) - 1 do offer(Ccore.bytes(ans[i]), p, how, out); end;
+    if given or (kind = kNone) then return 0; end;
+    g := Cvars.allGlobals();
+    procs := Cvars.allProcs();
+    if (LEN(p) > 0) and (p[0] = '$') then
+        for i := 0 to LEN(g) - 1 do
+            if fits(g[i].name, p[1..LEN(p)], how) then offer1(out, "$", 1, g[i].name); end;
+        end;
+        return 1;
+    end;
+    if cx = Cedit.cxExpr then
+        for i := 0 to LEN(Csyntax.Keywords) - 1 do offer(Csyntax.Keywords[i], p, how, out); end;
+        for i := 0 to LEN(Csyntax.Builtins) - 1 do offer(Csyntax.Builtins[i].name, p, how, out); end;
+        for i := 0 to LEN(procs) - 1 do offer(procs[i]^.s, p, how, out); end;
+        for i := 0 to LEN(g) - 1 do offer(g[i].name, p, how, out); end;
+        return 0;
+    end;
+    s := LEN(p);
+    while (s > 0) and (p[s - 1] # '/') do DEC(s); end;
+    if (s = 0) and (LEN(p) > 0) and (p[0] = '~') then
+        (* ~user: the users, as ~user/ *)
+        Names.init(ADR(names), Ccore.temps);
+        Names.init(ADR(homes), Ccore.temps);
+        Cvars.passwd(ADR(names), ADR(homes));
+        nm := Names.all(ADR(names));
+        for i := 0 to LEN(nm) - 1 do
+            if fits(nm[i], p[1..LEN(p)], how) then
+                Buf.init(ADR(b), Ccore.temps);
+                Buf.add(ADR(b), '~');
+                Buf.str(ADR(b), nm[i]);
+                Buf.add(ADR(b), '/');
+                Vals.push(out, Ccore.bufVal(ADR(b)));
+            end;
+        end;
+        return 1;
+    end;
+    if (cx = Cedit.cxCommand) and (s = 0) then
+        for i := 0 to LEN(Csyntax.Keywords) - 1 do offer(Csyntax.Keywords[i], p, how, out); end;
+        for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do offer(Csyntax.CmdBuiltins[i].name, p, how, out); end;
+        for i := 0 to LEN(procs) - 1 do offer(procs[i]^.s, p, how, out); end;
+        alongPath(p, how, out);
+        return 0;
+    end;
+    Buf.init(ADR(b), Ccore.temps);
+    if s = 0 then
+        Buf.add(ADR(b), '.');
+    elsif (p[0] # '~') or not Cvars.tilde(p[0..s], ADR(b)) then
+        Buf.str(ADR(b), p[0..s]);
+    end;
+    match cx of
+    | cxCommand: show := runnable;
+    | cxDir: show := dirs;
+    | else: show := all;
+    end;
+    listDir(Buf.bytes(ADR(b)), p[0..s], p[s..LEN(p)], show, how, out);
+    return s;
+end;
+
+(* What the unquoted word p might become in the context cx, after the
+   command's words, added to out; ask is the user's complete function.
+   True if out is ranked, best first, for nothing started with p. *)
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec; ask: Asker): BOOL;
+var ans, lines: Vals.Vec; b: Buf.Buf; a: []Ccore.Val; kind: Kind; off, at, skip, i: INT; given, r: BOOL;
+begin
+    Vals.init(ADR(ans), Ccore.temps);
+    kind := kUsual;
+    if LEN(words) > 0 then ask(p, words, ADR(ans)); end;
+    given := ans.len > 0;
+    if (LEN(words) > 0) and not given and specFind(Ccore.bytes(Ccore.toStr(words[0])), ADR(lines)) then
+        kind, at, skip := specSays(Vals.all(ADR(lines)), words, p, ADR(ans));
+        match kind of
+        | kFile: cx := Cedit.cxArg;
+        | kDir: cx := Cedit.cxDir;
+        | kCommand:
+            if at = LEN(words) then
+                cx := Cedit.cxCommand;
+            elsif Ccore.bytes(Ccore.toStr(words[at])) = "cd" then
+                cx := Cedit.cxDir;
+            else
+                cx := Cedit.cxArg;
+            end;
+        | else:
+        end;
+        if (kind = kCommand) and (at < LEN(words)) or (skip > 0) and (kind # kNone) then
+            (* a command line of its own, or a value after --name= *)
+            if kind = kCommand then
+                r := complete(p, cx, words[at..LEN(words)], out, ask);
+            else
+                r := complete(p[skip..LEN(p)], cx, [], out, ask);
+            end;
+            if skip > 0 then
+                a := Vals.all(out);
+                for i := 0 to LEN(a) - 1 do
+                    Buf.init(ADR(b), Ccore.temps);
+                    Buf.str(ADR(b), p[0..skip]);
+                    Buf.str(ADR(b), Ccore.bytes(a[i]));
+                    a[i] := Ccore.bufVal(ADR(b));
+                end;
+            end;
+            return r;
+        end;
+    end;
+    off := gather(p, cx, prefix, kind, given, Vals.all(ADR(ans)), out);
+    if (out^.len > 0) or (LEN(p) = off) then return false; end;
+    off := gather(p, cx, fuzzy, kind, given, Vals.all(ADR(ans)), out);
+    rank(out, off, p[off..LEN(p)]);
+    return true;
+end;
+
+end Ccomplete.

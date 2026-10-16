@@ -36,7 +36,7 @@ before it is started, not after.
       the Pascal editor through a pty, 27 scripts of keys, each byte
       written to the terminal, each line got and the history file the
       same.
-- [ ] 6. `Cinterp`, 3,400 lines of Pascal, in four steps, each
+- [x] 6. `Cinterp`, 3,400 lines of Pascal, in four steps, each
       compiled: (a) variables, expressions, statements, procedures;
       (b) words, expansion, redirections, processes, pipes, jobs,
       signals and traps; (c) the builtins; (d) completion, the spec
@@ -74,9 +74,22 @@ before it is started, not after.
         same output, errors and status. It found that a call lost its
         caller's locals (`Cvars.leave` cut the stack to the caller's
         base), now mended.
-  - [ ] (d) completion, the spec files and the hooks; `Ccomplete`.
+  - [x] (d) completion, the spec files and the hooks; `Ccomplete`.
+        `tests/test.cn` runs whole under the driver as under the
+        Pascal, 344 of 345, the one failing in both its path to
+        `concha.1`, which is `doc/concha.1` here; and 8 scripts more
+        of command words, variables, paths, `~user`, fuzzy ranking and
+        complete functions give the same `completions()`. What wants a
+        terminal (Tab, "did you mean" offered as the next line, ctrl-x
+        ctrl-e, job control) is checked at step 7.
 - [ ] 7. `Concha`: the command line, the REPL, startup, the queries.
-      `make test` passes `tests/test.cn`.
+      `make test` passes `tests/test.cn`. Still in `interp.pas` for
+      it: `SetColour`, `Prompt`, `HomeC`, `DumbTerm`, `NoColour`,
+      `RunParsed`, and a way to say the shell is interactive. The REPL
+      calls `Cinterp.noteSignals` when `editLine` returns, so that a
+      hangup at the prompt reaches the jobs; Concha sets `Cedit.hooks`
+      to `Cinterp.complete`, `Ccomplete.knownCommand` and
+      `Cinterp.editFile`.
 - [ ] 8. `doc/concha.1`, `README.md`, `doc/internals.md`: the build
       and the insides are raz's.
 
@@ -108,6 +121,13 @@ made.
 - **Wide characters.** The editor counts a character's columns by
   raz's `Width`, so a CJK character or an emoji takes two and the
   cursor stays where it is drawn; the Pascal counted one a character.
+- **A complete function that fails** puts back what it changed, the
+  frames and the fds above where it started, where the Pascal reset
+  the whole shell: from `completions()` in a procedure, the procedure
+  goes on with its own variables.
+- **ctrl-x ctrl-e's editor**, stopped with Ctrl-Z or not started for
+  want of a fork, ends the edit with the line as the file holds it;
+  the Pascal dropped the line.
 
 ## The handover
 

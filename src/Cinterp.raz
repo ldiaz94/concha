@@ -16,12 +16,12 @@
    each statement, and wherever a system call it interrupts gave up.
 
    Depends on Ccore for values and errors, on Csyntax for the tree, on
-   Cvars for the variables and procedures, on Cglob for patterns, and
-   on Ckern for execve. The builtins come in step 6c of the port, the
-   suggestions for a command not found in 6d; until then a builtin
-   answers that it is missing, and nothing is suggested. *)
+   Cvars for the variables and procedures, on Cglob for patterns, on
+   Cclock for time(), on Ccomplete and Cedit for completion and "did
+   you mean", and on Ckern for execve. Left out: the command line and
+   the REPL, which are Concha's. *)
 module Cinterp;
-import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
+import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Cedit, Ccomplete, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
 
 const
     MaxSaves = 256;    (* fds saved around a builtin's redirections *)
@@ -137,22 +137,8 @@ proc runArgs(a: []Ccore.Val): (INT, ERROR); forward;
 proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
 proc runText*(text, path: []U8): ERROR; forward;
 proc reapJobs*; forward;
-
-(* ---------------------------------------------- not yet ported *)
-
-proc missing(what: []U8): ERROR;
-begin
-    return Ccore.fail(Ccore.text("{} come with a later step of the port", [Fmt.str(what)]));
-end;
-
-proc suggestCommand(_name: []U8): []U8;
-begin
-    return "";
-end;
-
-proc correct(_a: []Ccore.Val);
-begin
-end;
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec): BOOL; forward;
+proc correct(a: []Ccore.Val); forward;
 
 (* ---------------------------------------------------------- signals *)
 
@@ -785,7 +771,7 @@ begin
             return 127;
         end;
         if interactive and not slash then
-            path := suggestCommand(name);
+            path := Ccomplete.suggestCommand(name);
             if LEN(path) > 0 then Ccore.put(2, Ccore.text("; did you mean {}?", [Fmt.str(path)])); end;
         end;
         Ccore.put(2, "\n");
@@ -2057,9 +2043,9 @@ begin
         return Ccore.strVal(try Cclock.format(try argStr(e, 0), ia)), nil;
     | bBasename: return pathPart(e, try need(e, 1, 2));
     | bDirname: return pathPart(e, try need(e, 1, 1));
-    | bCompletions:
+    | bCompletions:    (* what Tab would offer at the end of the line, as Tab finds it *)
         _ := try need(e, 1, 1);
-        return {}, missing("completions()");
+        return Cedit.completions(try argStr(e, 0), complete), nil;
     | bSort:
         _ := try need(e, 1, 1);
         v := try eval(e^.args[0]);
@@ -2586,6 +2572,115 @@ begin
     keepFds := false;
     exempt := 0;
     intr := false;
+end;
+
+(* -------------------------------------------- completion, editing *)
+
+(* The user's function complete, asked what the word p might become
+   after words: it gets them all as one list, the last being p, and
+   answers with a list of words or a string of lines, which go into
+   ans. It runs with every standard fd on /dev/null, an error in it
+   counts as no answer, and status is left as it was. *)
+proc ask(p: []U8; words: []Ccore.Val; ans: ^Vals.Vec);
+var
+    def, up: ^Csyntax.Stmt; all: Vals.Vec; one: [1]Ccore.Val; r: Ccore.Val; f: Cvars.Frame; s: []U8;
+    st, lvl, ns, ex, fd, i, j: INT; err: ERROR;
+begin
+    def := Cvars.findProc("complete");
+    if (def = nil) or not def^.isFunc then return; end;
+    Vals.init(ADR(all), Ccore.temps);
+    for i := 0 to LEN(words) - 1 do Vals.push(ADR(all), words[i]); end;
+    Vals.push(ADR(all), Ccore.strVal(p));
+    one[0] := Ccore.listVal(ADR(all));
+    st := Cvars.status();
+    lvl := nsave;
+    ns := nsub;
+    f := Cvars.here();
+    up := curFunc;
+    ex := exempt;
+    fd := Sys.open("/dev/null", {Sys.reading, Sys.writing});
+    if fd >= 0 then
+        for i := 0 to 2 do
+            if err = nil then err := saveFd(i); end;
+            _ := Sys.dupTo(fd, i);
+        end;
+        Sys.close(fd);
+        if err = nil then r, err := callProc(def, one); end;
+        if err # nil then
+            r := {};
+            closeSubs(ns);
+            Cvars.leave(f);
+            curFunc := up;
+            exempt := ex;
+            ctl := cNone;
+            tailOk := false;
+            keepFds := false;
+            intr := false;
+        end;
+    end;
+    restoreFds(lvl);
+    Cvars.setStatus(st);
+    if r.kind = Ccore.kList then
+        for i := 0 to INT(r.n) - 1 do Vals.push(ans, Ccore.toStr(Ccore.items(r)[i])); end;
+    elsif r.kind = Ccore.kStr then
+        s := Ccore.bytes(r);
+        i := 0;
+        while i < LEN(s) do
+            j := i;
+            while (j < LEN(s)) and (s[j] # '\n') do INC(j); end;
+            if j > i then Vals.push(ans, Ccore.strVal(s[i..j])); end;
+            i := j + 1;
+        end;
+    end;
+end;
+
+(* For the line editor's Tab: what the unquoted word p might become in
+   the context cx, after the command's words, added to out; true if out
+   is ranked. *)
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec): BOOL;
+begin
+    return Ccomplete.complete(p, cx, words, out, ask);
+end;
+
+(* An external command typed at the prompt that won't be found: the
+   child is to say "did you mean", and the line fixed that way is
+   offered as the next line's suggestion. *)
+proc correct(a: []Ccore.Val);
+var nm, fix: []U8;
+begin
+    if not interactive or (Cvars.depth > 0) or (LEN(a) = 0) then return; end;
+    nm := Ccore.bytes(Ccore.toStr(a[0]));
+    if (Str.find(nm, "/") >= 0) or Ccomplete.knownCommand(nm) then return; end;
+    fix := Ccomplete.suggestCommand(nm);
+    if LEN(fix) > 0 then Cedit.propose(nm, fix); end;
+end;
+
+(* For the line editor's ctrl-x ctrl-e: $VISUAL, or $EDITOR, or vi, run
+   on the file path as a command in the foreground. The editor may be a
+   procedure, and may carry options after blanks, as in "emacs -nw".
+   status is left as it was; an error, written already, is the edit's
+   end, the line taken as the file holds it. *)
+proc editFile*(path: []U8);
+var a: Vals.Vec; e: []U8; m: Ccore.Mark; st, i, j: INT;
+begin
+    m := Ccore.mark();
+    st := Cvars.status();
+    e := Cvars.str("VISUAL");
+    if LEN(e) = 0 then e := Cvars.str("EDITOR"); end;
+    if LEN(e) = 0 then e := "vi"; end;
+    Vals.init(ADR(a), Ccore.temps);
+    i := 0;
+    while i < LEN(e) do
+        while (i < LEN(e)) and ((e[i] = ' ') or (e[i] = '\t')) do INC(i); end;
+        j := i;
+        while (j < LEN(e)) and (e[j] # ' ') and (e[j] # '\t') do INC(j); end;
+        if j > i then Vals.push(ADR(a), Ccore.strVal(e[i..j])); end;
+        i := j;
+    end;
+    Vals.push(ADR(a), Ccore.strVal(path));
+    _, _ := runArgs(Vals.all(ADR(a)));
+    Cvars.setStatus(st);
+    Ccore.release(m);
 end;
 
 (* ------------------------------------------------------------ setup *)
