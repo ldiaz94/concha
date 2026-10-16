@@ -28,10 +28,14 @@ before it is started, not after.
       went. Checked against fuzzy(3) on 60,000 pairs, and against hora
       at 10,000 instants in every zone, fat and slim, and at every hour
       of DST years in zones with footers made for it.
-- [ ] 5. `Cedit`: the line editor, history, highlighting, the menu.
+- [x] 5. `Cedit`: the line editor, history, highlighting, the menu.
       Raw mode is `Sys.rawMode`, which turns OPOST off as the Pascal
       didn't: a new line written then is `\r\n`. The Pascal's timed
       read for an escape sequence (VTIME 0.2 s) is `Sys.ready(fd, 200)`.
+      The hooks are `Cedit.hooks^`, as `Ccore.opts^`. Checked against
+      the Pascal editor through a pty, 27 scripts of keys, each byte
+      written to the terminal, each line got and the history file the
+      same.
 - [ ] 6. `Cinterp`, 3,400 lines of Pascal, in four steps, each
       compiled: (a) variables, expressions, statements, procedures;
       (b) words, expansion, redirections, processes, pipes, jobs,
@@ -67,6 +71,10 @@ before it is started, not after.
 
 Meant differences from the Pascal concha are listed here as they are
 made.
+
+- **Wide characters.** The editor counts a character's columns by
+  raz's `Width`, so a CJK character or an emoji takes two and the
+  cursor stays where it is drawn; the Pascal counted one a character.
 
 ## The handover
 

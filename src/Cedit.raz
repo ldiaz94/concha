@@ -1,0 +1,1919 @@
+(* Cedit: the line editor, with history, highlighting, suggestions and
+   completion.
+
+   The terminal is raw only while a line is typed. The prompt is
+   somebody else's business: the editor asks the terminal where the
+   cursor is (ESC [6n) and draws from there, so any prompt, coloured or
+   not, just works. A long line wraps; the cursor is kept as an offset
+   from the line's start, and the screen's rows are worked out from it
+   and the terminal's width.
+
+   The keys are Emacs's, as readline has them. What the shell knows,
+   which commands run and what a word might become, it gives through
+   hooks: the editor knows nothing of variables or files but the
+   history's. The highlighting is a guess from the line alone; a wrong
+   guess costs a colour, nothing more.
+
+   It depends on Ccore for output, temporaries and values, on Sys for
+   the terminal, and on Width for how many columns a character takes.
+   Left out: a key map of the user's own, and grapheme clusters (an
+   emoji joined by a zero-width joiner counts as its parts). *)
+module Cedit;
+import Sys, Heap, Buf, Str, Width, Ccore, Vals := Vec(Ccore.Val), Names := Vec([]U8);
+
+type
+    (* What editLine got. *)
+    Got* = (gotLine, gotEof, gotCancel);
+
+    (* Where the word being completed stands. *)
+    Context* = (cxCommand, cxArg, cxExpr, cxDir);
+
+    (* Tab: adds to out every word the unquoted prefix p might become in
+       context cx. words holds the command's words before it, unquoted,
+       or nothing where p isn't an argument of a command. True if out
+       is ranked, best first, and must stay in that order. *)
+    Completer* = proc(p: []U8; cx: Context; words: []Ccore.Val; out: ^Vals.Vec): BOOL;
+
+    (* What the shell lends the editor; nil leaves each out. *)
+    Hooks* = record
+        reprompt*: proc;    (* draws the prompt again, after ctrl-l *)
+        complete*: Completer;
+        known*: proc(name: []U8): BOOL;    (* can the command name run? *)
+        editor*: proc(path: []U8);    (* ctrl-x ctrl-e: the user's editor on path *)
+    end;
+
+    (* The line as it was before a change, for ctrl-_. *)
+    Step = record
+        s: []U8;
+        cur: INT;
+    end;
+
+    (* Where the words of a command lie in the line, [a[i], b[i]). *)
+    Spans = record
+        n: INT;
+        a, b: [32]INT;
+    end;
+
+    (* What scanning the line up to the cursor found: the word the
+       cursor is in (from ws) and its context, the quote it is in (q)
+       and where that quote's text starts (qs), and the words of the
+       command so far. *)
+    Scan = record
+        ws, qs: INT;
+        q: U8;
+        inWord, expect, expr, wcmd, cd, redir: BOOL;
+        nest: U64;    (* expr at each open parenthesis, a bit a level *)
+        spans: Spans;
+    end;
+
+    (* The word being completed: where its text starts (a), how much of
+       each candidate lies before that (pre, the part before a quote),
+       the quote it is in, whether a leading ~ means HOME, whether it is
+       a $name, and the word, unquoted. *)
+    Word = record
+        ws, a, pre: INT;
+        q: U8;
+        home, isVar: BOOL;
+        typed: []U8;
+    end;
+
+    (* A menu as menu lays it out: the screen's width and a column's,
+       the columns and rows of candidates, the rows the screen has under
+       the line, how many of them show from topRow on, and the
+       selection, -1 for none. *)
+    Menu = record
+        w, cw, ncol, nrow, h, vis, topRow, sel: INT;
+    end;
+
+const
+    maxHist = 1000;
+    maxUndo = 64;
+    searchTag = "  search: ";
+
+    (* Keys: a byte as typed, -1 at the end of input, or one of these
+       for an escape sequence. *)
+    kUp = 1000;
+    kDown = 1001;
+    kLeft = 1002;
+    kRight = 1003;
+    kHome = 1004;
+    kEnd = 1005;
+    kDel = 1006;
+    kWordL = 1007;
+    kWordR = 1008;
+    kKillWord = 1009;
+    kNone = 1010;
+    kKillWordR = 1011;
+    kLastArg = 1012;
+    kUpWord = 1013;
+    kDownWord = 1014;
+    kCapWord = 1015;
+    kSwapWords = 1016;
+    kInEditor = 1017;
+    kBackTab = 1018;
+
+    ctrlA = 1;
+    ctrlB = 2;
+    ctrlC = 3;
+    ctrlD = 4;
+    ctrlE = 5;
+    ctrlF = 6;
+    ctrlG = 7;
+    ctrlH = 8;
+    tab = 9;
+    ctrlJ = 10;
+    ctrlK = 11;
+    ctrlL = 12;
+    ctrlM = 13;
+    ctrlN = 14;
+    ctrlP = 16;
+    ctrlR = 18;
+    ctrlT = 20;
+    ctrlU = 21;
+    ctrlW = 23;
+    ctrlX = 24;
+    ctrlY = 25;
+    esc = 27;
+    ctrlUnderscore = 31;
+    del = 127;
+
+    (* The colour of each byte of the line: its class, an index of
+       hiCodes. A completion list reuses blue and green. *)
+    hPlain = 0;
+    hComment = 1;
+    hSingle = 2;
+    hDouble = 3;
+    hVar = 4;
+    hKey = 5;
+    hBack = 6;
+    hKnown = 7;
+    hUnknown = 8;
+    hDir = hKnown;
+    hExe = hSingle;
+    hiCodes: [][]U8 = ["", "2", "32", "33", "36", "1", "35", "34", "31"];
+
+    keywords: [][]U8 = ["begin", "end", "if", "then", "else", "while", "do", "repeat", "until", "for", "to",
+        "downto", "in", "case", "of", "var", "procedure", "function", "export", "break", "continue", "exit",
+        "and", "or", "not", "xor", "div", "mod"];
+
+var
+    hooksAt: Hooks;
+    hooks*: ^Hooks;
+
+    line: Buf.Buf;    (* the line being edited *)
+    cur: INT;    (* the cursor, a byte offset in it *)
+    startCol, curRow: INT;    (* where the line starts on the screen, and the cursor's row in it *)
+    raw: BOOL;
+    contLine: BOOL;    (* a continuation line: no suggestions *)
+
+    pend: [256]U8;    (* typeahead read while asking where the cursor is *)
+    npend, ppend: INT;
+
+    hist: Names.Vec;    (* oldest first, each from the heap *)
+    hidx: INT;    (* the entry shown, LEN(hist) for the line being typed *)
+    saved: []U8;    (* the line being typed, while history is shown *)
+    histPath: []U8;
+
+    fixed: []U8;    (* the last line, corrected, for the next line *)
+    offer: []U8;    (* the correction this line offers *)
+
+    killed: Buf.Buf;    (* the last text killed, for ctrl-y; kills in a row join up *)
+    killing, wasKilling: BOOL;
+
+    undo: [maxUndo]Step;    (* newest last *)
+    nundo: INT;
+
+    (* alt-.: the history entry the last argument came from, and where
+       it went in the line *)
+    argHist, argAt, argN: INT;
+
+    (* the last command word looked up for highlighting, and the answer *)
+    lastWord: []U8;
+    lastKnown: BOOL;
+
+    (* classify's state: is a command word, or an expression, next? *)
+    hStart, hExpr: BOOL;
+
+    wd: Word;
+
+(* ------------------------------------------------------------- bytes *)
+
+proc letter(c: U8): BOOL;
+begin
+    return ((c >= 'a') and (c <= 'z')) or ((c >= 'A') and (c <= 'Z')) or (c = '_');
+end;
+
+proc identCh(c: U8): BOOL;
+begin
+    return letter(c) or ((c >= '0') and (c <= '9'));
+end;
+
+proc oneOf(c: U8; bytes: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(bytes) - 1 do
+        if bytes[i] = c then return true; end;
+    end;
+    return false;
+end;
+
+(* Is c a byte inside a UTF-8 character, not its first? *)
+proc inner(c: U8): BOOL;
+begin
+    return (c & 0C0H) = 80H;
+end;
+
+(* The columns s takes on the screen, a control character, drawn as a
+   blank, one. *)
+proc columns(s: []U8): INT;
+var c: I32; i, n, w: INT;
+begin
+    i := 0;
+    w := 0;
+    while i < LEN(s) do
+        c, n := Str.decode(s[i..LEN(s)]);
+        if c < 32 then INC(w); else w := w + Width.width(c); end;
+        i := i + n;
+    end;
+    return w;
+end;
+
+proc num(b: ^Buf.Buf; n: INT);
+var d: [20]U8; k: INT;
+begin
+    d, k := Str.fromInt(n);
+    Buf.str(b, d[0..k]);
+end;
+
+proc bell;
+begin
+    Ccore.put(2, "\x07");
+end;
+
+(* ---------------------------------------------------------- terminal *)
+
+proc rawOn;
+begin
+    raw := Sys.rawMode(0);
+end;
+
+(* The terminal as it was before the line, after an error too. *)
+proc reset*;
+begin
+    if raw then Sys.restoreMode(0); end;
+    raw := false;
+end;
+
+proc cols: INT;
+var c: INT;
+begin
+    c, _ := Sys.termSize(2);
+    return c;
+end;
+
+proc screenRows: INT;
+var r: INT;
+begin
+    _, r := Sys.termSize(2);
+    return r;
+end;
+
+proc rawByte: INT;
+var c: [1]U8; k: INT;
+begin
+    repeat k := Sys.read(0, c); until k # -Ccore.errIntr;
+    if k <= 0 then return -1; end;
+    return c[0];
+end;
+
+(* A byte the terminal sends within 0.2 s, or -1. *)
+proc timedByte: INT;
+begin
+    if not Sys.ready(0, 200) then return -1; end;
+    return rawByte();
+end;
+
+proc readByte: INT;
+begin
+    if ppend < npend then
+        INC(ppend);
+        return pend[ppend - 1];
+    end;
+    return rawByte();
+end;
+
+proc push(c: INT);
+begin
+    if npend < LEN(pend) then
+        pend[npend] := U8(c);
+        INC(npend);
+    end;
+end;
+
+(* Where is the cursor? Typeahead before the answer is kept. *)
+proc queryCol;
+var c, col: INT;
+begin
+    startCol := 0;
+    if ppend >= npend then
+        npend := 0;
+        ppend := 0;
+    end;
+    Ccore.put(2, "\x1b[6n");
+    while true do
+        c := timedByte();
+        if c < 0 then break; end;
+        if c # esc then
+            push(c);
+            continue;
+        end;
+        if timedByte() # '[' then break; end;
+        repeat c := timedByte(); until (c < 0) or (c = ';');
+        col := 0;
+        c := timedByte();
+        while (c >= '0') and (c <= '9') do
+            col := col * 10 + c - '0';
+            c := timedByte();
+        end;
+        if col > 0 then startCol := col - 1; end;
+        break;
+    end;
+end;
+
+(* -------------------------------------------------------------- keys *)
+
+proc getKey: INT;
+var c, p1, p2: INT;
+begin
+    c := readByte();
+    if c # esc then return c; end;
+    c := readByte();
+    match c of
+    | 'b': return kWordL;
+    | 'f': return kWordR;
+    | 'd': return kKillWordR;
+    | '.', '_': return kLastArg;
+    | 'u': return kUpWord;
+    | 'l': return kDownWord;
+    | 'c': return kCapWord;
+    | 't': return kSwapWords;
+    | ctrlH, del: return kKillWord;
+    | '[', 'O':
+    | else: return kNone;
+    end;
+    (* CSI or SS3: parameters, then the final byte *)
+    p1 := 0;
+    p2 := 0;
+    while true do
+        c := readByte();
+        if (c >= '0') and (c <= '9') then
+            p2 := p2 * 10 + c - '0';
+        elsif c = ';' then
+            p1 := p2;
+            p2 := 0;
+        else
+            break;
+        end;
+    end;
+    if p1 = 0 then
+        p1 := p2;
+        p2 := 0;
+    end;
+    match c of
+    | 'A': return kUp;
+    | 'B': return kDown;
+    | 'C':
+        if p2 = 5 then return kWordR; end;
+        return kRight;
+    | 'D':
+        if p2 = 5 then return kWordL; end;
+        return kLeft;
+    | 'Z': return kBackTab;
+    | 'H': return kHome;
+    | 'F': return kEnd;
+    | '~':
+        match p1 of
+        | 1, 7: return kHome;
+        | 4, 8: return kEnd;
+        | 3:
+            if p2 = 5 then return kKillWordR; end;
+            return kDel;
+        | else: return kNone;
+        end;
+    | else: return kNone;
+    end;
+end;
+
+(* ---------------------------------------------------------- the line *)
+
+proc text: []U8;
+begin
+    return Buf.bytes(ADR(line));
+end;
+
+proc prevB(i: INT): INT;
+begin
+    if i > 0 then DEC(i); end;
+    while (i > 0) and inner(text()[i]) do DEC(i); end;
+    return i;
+end;
+
+proc nextB(i: INT): INT;
+begin
+    if i < line.len then INC(i); end;
+    while (i < line.len) and inner(text()[i]) do INC(i); end;
+    return i;
+end;
+
+(* s put in at the cursor, which moves past it. *)
+proc insert(s: []U8);
+var t: []U8; n: INT;
+begin
+    n := LEN(s);
+    if n = 0 then return; end;
+    _ := Buf.spare(ADR(line), n);
+    INC(line.len, n);
+    t := text();
+    COPY(t[cur + n..line.len], t[cur..line.len - n]);
+    COPY(t[cur..cur + n], s);
+    INC(cur, n);
+end;
+
+proc insertByte(c: U8);
+var s: [1]U8;
+begin
+    s[0] := c;
+    insert(s);
+end;
+
+(* [a, b) taken out. *)
+proc cut(a, b: INT);
+var t: []U8;
+begin
+    if b <= a then return; end;
+    t := text();
+    COPY(t[a..line.len - (b - a)], t[b..line.len]);
+    DEC(line.len, b - a);
+    if cur > b then
+        DEC(cur, b - a);
+    elsif cur > a then
+        cur := a;
+    end;
+end;
+
+(* The line made s, with the cursor at its end. *)
+proc setLine(s: []U8);
+begin
+    Buf.reset(ADR(line));
+    Buf.str(ADR(line), s);
+    cur := LEN(s);
+end;
+
+proc wordCh(c: U8): BOOL;
+begin
+    return not oneOf(c, " \t/.-|;&=");
+end;
+
+proc isWord(i: INT): BOOL;
+begin
+    return wordCh(text()[i]);
+end;
+
+(* The start of the word before i. *)
+proc wordLeft(i: INT): INT;
+begin
+    while (i > 0) and not isWord(i - 1) do DEC(i); end;
+    while (i > 0) and isWord(i - 1) do DEC(i); end;
+    return i;
+end;
+
+(* The end of the word after i. *)
+proc wordRight(i: INT): INT;
+begin
+    while (i < line.len) and not isWord(i) do INC(i); end;
+    while (i < line.len) and isWord(i) do INC(i); end;
+    return i;
+end;
+
+(* [a, b) cut into the kill buffer: after what the last key killed, or
+   before it when killing backwards. *)
+proc kill(a, b: INT; back: BOOL);
+var n: INT; k: []U8;
+begin
+    if b <= a then return; end;
+    if not wasKilling then Buf.reset(ADR(killed)); end;
+    n := b - a;
+    _ := Buf.spare(ADR(killed), n);
+    INC(killed.len, n);
+    k := Buf.bytes(ADR(killed));
+    if back then
+        COPY(k[n..killed.len], k[0..killed.len - n]);
+        COPY(k[0..n], text()[a..b]);
+    else
+        COPY(k[killed.len - n..killed.len], text()[a..b]);
+    end;
+    cut(a, b);
+    killing := true;
+end;
+
+(* alt-u, alt-l, alt-c: the word after the cursor in upper or lower
+   case, or capitalised, and the cursor past it. ASCII letters only. *)
+proc caseWord(k: INT);
+var i: INT; up: BOOL; t: []U8;
+begin
+    t := text();
+    i := cur;
+    while (i < line.len) and not isWord(i) do INC(i); end;
+    up := k # kDownWord;
+    while (i < line.len) and isWord(i) do
+        if up and (t[i] >= 'a') and (t[i] <= 'z') then
+            DEC(t[i], 32);
+        elsif not up and (t[i] >= 'A') and (t[i] <= 'Z') then
+            INC(t[i], 32);
+        end;
+        if k = kCapWord then up := false; end;
+        INC(i);
+    end;
+    cur := i;
+end;
+
+(* alt-t: the word before the cursor swapped with the one after it, or
+   at the end of the line, the last two words. *)
+proc swapWords;
+var b1, e1, b2, e2, n: INT; t, s: []U8;
+begin
+    e2 := wordRight(cur);
+    b2 := wordLeft(e2);
+    b1 := wordLeft(b2);
+    e1 := wordRight(b1);
+    if (b1 = b2) or (b2 < e1) then return; end;
+    n := e2 - b1;
+    s := text();
+    t := Ccore.alloc(n)[0..n];
+    COPY(t[0..e2 - b2], s[b2..e2]);
+    COPY(t[e2 - b2..e2 - e1], s[e1..b2]);
+    COPY(t[e2 - e1..n], s[b1..e1]);
+    COPY(s[b1..e2], t);
+    cur := e2;
+end;
+
+(* -------------------------------------------------------------- undo *)
+
+proc undoClear;
+begin
+    while nundo > 0 do
+        DEC(nundo);
+        Str.free(Heap.heap, undo[nundo].s);
+    end;
+end;
+
+(* The line, with its cursor, kept as the newest undo step. *)
+proc undoPush;
+begin
+    if nundo = maxUndo then
+        Str.free(Heap.heap, undo[0].s);
+        COPY(undo[0..maxUndo - 1], undo[1..maxUndo]);
+        DEC(nundo);
+    end;
+    undo[nundo] := {s: Ccore.perm(text()), cur: cur};
+    INC(nundo);
+end;
+
+proc undoPop;
+begin
+    if nundo = 0 then
+        bell;
+        return;
+    end;
+    DEC(nundo);
+    setLine(undo[nundo].s);
+    cur := undo[nundo].cur;
+    Str.free(Heap.heap, undo[nundo].s);
+end;
+
+(* ------------------------------------------------------ highlighting *)
+
+(* Each byte of the line gets a class, found by a scanner in the style
+   of Csyntax's. It sees only the line being edited, so it guesses.
+   Widths never look at classes. *)
+
+(* known, remembering one word, so that an unchanged word costs nothing
+   a key. *)
+proc runnable(s: []U8): BOOL;
+begin
+    if (LEN(lastWord) > 0) and (s = lastWord) then return lastKnown; end;
+    lastKnown := hooks^.known(s);
+    Str.free(Heap.heap, lastWord);
+    lastWord := Ccore.perm(s);
+    return lastKnown;
+end;
+
+proc fill(h: []U8; a, b: INT; k: U8);
+begin
+    while a < b do
+        h[a] := k;
+        INC(a);
+    end;
+end;
+
+proc isKeyword(s: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(keywords) - 1 do
+        if s = keywords[i] then return true; end;
+    end;
+    return false;
+end;
+
+(* The end of a $name, ${name} or $(expr) starting at a, or a if none. *)
+proc varEnd(a: INT): INT;
+var t: []U8; e, d: INT;
+begin
+    t := text();
+    e := a + 1;
+    if e >= LEN(t) then return a; end;
+    if letter(t[e]) then
+        while (e < LEN(t)) and identCh(t[e]) do INC(e); end;
+    elsif t[e] = '{' then
+        while (e < LEN(t)) and (t[e] # '}') do INC(e); end;
+        if e < LEN(t) then INC(e); end;
+    elsif t[e] = '(' then
+        d := 0;
+        repeat
+            if t[e] = '(' then
+                INC(d);
+            elsif t[e] = ')' then
+                DEC(d);
+            end;
+            INC(e);
+        until (d = 0) or (e >= LEN(t));
+    else
+        return a;
+    end;
+    return e;
+end;
+
+(* The end of a command word or argument at a: a blank or an operator. *)
+proc wordEnd(a: INT): INT;
+var t: []U8;
+begin
+    t := text();
+    while (a < LEN(t)) and not oneOf(t[a], " \t;|&<>`'\"$()") do INC(a); end;
+    return a;
+end;
+
+(* The command word at a, blue if it can run and red if not, unless it
+   is a variable being assigned; where it ends. *)
+proc command(h: []U8; a: INT): INT;
+var t: []U8; j, k: INT;
+begin
+    t := text();
+    j := wordEnd(a);
+    if (hooks^.known = nil) or (j = a) then return j; end;
+    k := j;
+    while (k < LEN(t)) and ((t[k] = ' ') or (t[k] = '\t')) do INC(k); end;
+    if (k < LEN(t)) and ((t[k] = '[') or (t[k] = ':') and (k + 1 < LEN(t)) and (t[k + 1] = '=')) then
+        return j;
+    end;
+    if runnable(t[a..j]) then
+        fill(h, a, j, hKnown);
+    else
+        fill(h, a, j, hUnknown);
+    end;
+    return j;
+end;
+
+(* The string at i, with the $ parts in it; where it ends. *)
+proc doubleQuoted(h: []U8; i: INT): INT;
+var t: []U8; j, k, e: INT;
+begin
+    t := text();
+    j := i + 1;
+    while (j < LEN(t)) and (t[j] # '"') do
+        if t[j] = '\\' then INC(j, 2); else INC(j); end;
+    end;
+    if j < LEN(t) then INC(j); else j := LEN(t); end;
+    fill(h, i, j, hDouble);
+    k := i + 1;
+    while k < j - 1 do
+        if t[k] = '\\' then
+            INC(k, 2);
+        elsif t[k] = '$' then
+            e := varEnd(k);
+            if e > k then
+                if e > j then e := j; end;
+                fill(h, k, e, hVar);
+                k := e;
+            else
+                INC(k);
+            end;
+        else
+            INC(k);
+        end;
+    end;
+    return j;
+end;
+
+(* The name at i: a keyword, a command word, or an argument; where it
+   ends. *)
+proc wordAt(h: []U8; i: INT): INT;
+var t, w: []U8; j: INT;
+begin
+    t := text();
+    j := i;
+    while (j < LEN(t)) and identCh(t[j]) do INC(j); end;
+    w := t[i..j];
+    if (hStart or hExpr) and isKeyword(w) then
+        fill(h, i, j, hKey);
+        if (w = "begin") or (w = "then") or (w = "do") or (w = "else") or (w = "repeat") or (w = "of") or (w = "end") then
+            hStart := true;
+            hExpr := false;
+        elsif (w = "var") or (w = "export") or (w = "procedure") or (w = "function") or (w = "break") or (w = "continue")
+            or (w = "exit") then
+            hStart := false;
+            hExpr := false;
+        else
+            hStart := false;
+            hExpr := true;
+        end;
+    else
+        if hStart then
+            j := command(h, i);
+        elsif not hExpr then
+            j := wordEnd(i);
+        end;
+        hStart := false;
+    end;
+    return j;
+end;
+
+proc classify(h: []U8);
+var t: []U8; i, j: INT; c: U8;
+begin
+    t := text();
+    fill(h, 0, LEN(t), hPlain);
+    i := 0;
+    hStart := true;
+    hExpr := false;
+    while i < LEN(t) do
+        c := t[i];
+        if (c = '/') and (i + 1 < LEN(t)) and (t[i + 1] = '/') and ((i = 0) or oneOf(t[i - 1], " \t;")) then
+            fill(h, i, LEN(t), hComment);
+            break;
+        end;
+        match c of
+        | '{':
+            if hStart or hExpr then
+                j := i;
+                while (j < LEN(t)) and (t[j] # '}') do INC(j); end;
+                if j < LEN(t) then INC(j); end;
+                fill(h, i, j, hComment);
+                i := j;
+            else
+                i := wordEnd(i + 1);
+                hStart := false;
+            end;
+        | '\'':
+            j := i + 1;
+            while j < LEN(t) do
+                if t[j] # '\'' then
+                    INC(j);
+                elsif (j + 1 < LEN(t)) and (t[j + 1] = '\'') then
+                    INC(j, 2);
+                else
+                    break;
+                end;
+            end;
+            if j < LEN(t) then INC(j); end;
+            fill(h, i, j, hSingle);
+            i := j;
+            hStart := false;
+        | '"':
+            i := doubleQuoted(h, i);
+            hStart := false;
+        | '`':
+            h[i] := hBack;
+            INC(i);
+            hStart := true;
+            hExpr := false;
+        | '$':
+            j := varEnd(i);
+            if j > i then
+                fill(h, i, j, hVar);
+                i := j;
+            else
+                INC(i);
+            end;
+            hStart := false;
+        | '\\':
+            INC(i, 2);
+            hStart := false;
+        | ';', '|', '&':
+            INC(i);
+            hStart := true;
+            hExpr := false;
+        | ':':
+            if (i + 1 < LEN(t)) and (t[i + 1] = '=') then
+                hExpr := true;
+                INC(i);
+            end;
+            INC(i);
+            hStart := false;
+        | ' ', '\t', '(', ')', ',', '[', ']', '<', '>', '=', '+', '-', '*': INC(i);
+        | 'A'..'Z', 'a'..'z', '_': i := wordAt(h, i);
+        | else:
+            if hStart then
+                j := command(h, i);
+                if j > i then i := j; else INC(i); end;
+            elsif not hExpr then
+                i := wordEnd(i + 1);
+            else
+                INC(i);
+            end;
+            hStart := false;
+        end;
+    end;
+end;
+
+proc colourOn(b: ^Buf.Buf; k: INT);
+begin
+    Buf.str(b, "\x1b[");
+    Buf.str(b, hiCodes[k]);
+    Buf.add(b, 'm');
+end;
+
+(* The line into b, with colour escapes where the class changes, and
+   control characters as blanks. *)
+proc paint(b: ^Buf.Buf);
+var t, h: []U8; i: INT; prev: U8; c: U8;
+begin
+    t := text();
+    if Ccore.opts^.colour and (LEN(t) > 0) then
+        h := Ccore.alloc(LEN(t))[0..LEN(t)];
+        classify(h);
+    end;
+    prev := hPlain;
+    for i := 0 to LEN(t) - 1 do
+        if (LEN(h) > 0) and (h[i] # prev) then
+            if prev # hPlain then Buf.str(b, "\x1b[0m"); end;
+            if h[i] # hPlain then colourOn(b, h[i]); end;
+            prev := h[i];
+        end;
+        c := t[i];
+        if c < ' ' then c := ' '; end;
+        Buf.add(b, c);
+    end;
+    if prev # hPlain then Buf.str(b, "\x1b[0m"); end;
+end;
+
+(* ----------------------------------------------------------- drawing *)
+
+(* The line, then sfx dim after it, then rows rows of text below it
+   (below, the rows joined by CR LF, none wider than the screen), and
+   the cursor back in the line. *)
+proc show(sfx, below: []U8; rows: INT);
+var b: Buf.Buf; m: Ccore.Mark; w, endA, endRow, ta, tRow, tCol, i: INT; wrapped: BOOL;
+begin
+    m := Ccore.mark();
+    w := cols();
+    Buf.init(ADR(b), Ccore.temps);
+    if curRow > 0 then
+        Buf.str(ADR(b), "\x1b[");
+        num(ADR(b), curRow);
+        Buf.add(ADR(b), 'A');
+    end;
+    Buf.add(ADR(b), '\r');
+    if startCol > 0 then
+        Buf.str(ADR(b), "\x1b[");
+        num(ADR(b), startCol);
+        Buf.add(ADR(b), 'C');
+    end;
+    Buf.str(ADR(b), "\x1b[J");
+    paint(ADR(b));
+    if LEN(sfx) > 0 then
+        Buf.str(ADR(b), "\x1b[2m");
+        for i := 0 to LEN(sfx) - 1 do
+            if sfx[i] < ' ' then Buf.add(ADR(b), ' '); else Buf.add(ADR(b), sfx[i]); end;
+        end;
+        Buf.str(ADR(b), "\x1b[0m");
+    end;
+    endA := startCol + columns(text()) + columns(sfx);
+    wrapped := (endA > 0) and (endA mod w = 0);
+    if wrapped then Buf.str(ADR(b), "\r\n"); end;
+    endRow := endA div w;
+    if rows > 0 then
+        (* a wrapped line already stands at the start of an empty row *)
+        if not wrapped then
+            Buf.str(ADR(b), "\r\n");
+            INC(endRow);
+        end;
+        Buf.str(ADR(b), below);
+        INC(endRow, rows - 1);
+    end;
+    ta := startCol + columns(text()[0..cur]);
+    tRow := ta div w;
+    tCol := ta mod w;
+    if endRow > tRow then
+        Buf.str(ADR(b), "\x1b[");
+        num(ADR(b), endRow - tRow);
+        Buf.add(ADR(b), 'A');
+    end;
+    Buf.add(ADR(b), '\r');
+    if tCol > 0 then
+        Buf.str(ADR(b), "\x1b[");
+        num(ADR(b), tCol);
+        Buf.add(ADR(b), 'C');
+    end;
+    curRow := tRow;
+    Ccore.put(2, Buf.bytes(ADR(b)));
+    Ccore.release(m);
+end;
+
+(* The line alone, without a suggestion. *)
+proc plain;
+begin
+    show("", "", 0);
+end;
+
+(* The cursor after the line, ready for output. *)
+proc finish;
+begin
+    cur := line.len;
+    plain;
+    Ccore.put(2, "\r\n");
+    curRow := 0;
+end;
+
+(* ----------------------------------------------------------- history *)
+
+proc histPush(s: []U8);
+var h: [][]U8;
+begin
+    if hist.len = maxHist then
+        h := Names.all(ADR(hist));
+        Str.free(Heap.heap, h[0]);
+        COPY(h[0..maxHist - 1], h[1..maxHist]);
+        Names.resize(ADR(hist), maxHist - 1);
+    end;
+    Names.push(ADR(hist), Ccore.perm(s));
+end;
+
+proc entry(i: INT): []U8;
+begin
+    return Names.all(ADR(hist))[i];
+end;
+
+proc blankLine(s: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(s) - 1 do
+        if (s[i] # ' ') and (s[i] # '\t') then return false; end;
+    end;
+    return true;
+end;
+
+(* s, a line entered, onto the history and its file; not a blank line,
+   nor the line before again. *)
+proc histAdd*(s: []U8);
+var fd: INT;
+begin
+    if blankLine(s) then return; end;
+    if (hist.len > 0) and (entry(hist.len - 1) = s) then return; end;
+    histPush(s);
+    if LEN(histPath) = 0 then return; end;
+    fd := Sys.openMode(histPath, {Sys.writing, Sys.creating, Sys.appending}, Ccore.permOwn);
+    if fd < 0 then return; end;
+    Ccore.put(fd, s);
+    Ccore.put(fd, "\n");
+    Sys.close(fd);
+end;
+
+(* The history from the file at path, where the lines entered go too.
+   A file grown half as long again as the history keeps is cut back
+   to it. *)
+proc histLoad*(path: []U8);
+var b: Buf.Buf; s: []U8; i, j, total, fd: INT;
+begin
+    histPath := Ccore.perm(path);
+    Buf.init(ADR(b), Heap.heap);
+    defer Buf.done(ADR(b));
+    if Ccore.readFile(path, ADR(b)) # 0 then return; end;
+    s := Buf.bytes(ADR(b));
+    total := 0;
+    i := 0;
+    while i < LEN(s) do
+        j := i;
+        while (j < LEN(s)) and (s[j] # '\n') do INC(j); end;
+        if j > i then
+            histPush(s[i..j]);
+            INC(total);
+        end;
+        i := j + 1;
+    end;
+    if total > maxHist + maxHist div 2 then
+        fd := Sys.openMode(histPath, {Sys.writing, Sys.creating, Sys.truncating}, Ccore.permOwn);
+        if fd < 0 then return; end;
+        for i := 0 to hist.len - 1 do
+            Ccore.put(fd, entry(i));
+            Ccore.put(fd, "\n");
+        end;
+        Sys.close(fd);
+    end;
+end;
+
+proc histMove(d: INT);
+var h: INT;
+begin
+    h := hidx + d;
+    if (h < 0) or (h > hist.len) then return; end;
+    if hidx = hist.len then
+        Str.free(Heap.heap, saved);
+        saved := Ccore.perm(text());
+    end;
+    hidx := h;
+    if hidx = hist.len then setLine(saved); else setLine(entry(hidx)); end;
+end;
+
+proc separator(c: U8): BOOL;
+begin
+    return oneOf(c, " \t;&|<>");
+end;
+
+(* Where the last word of s starts. Quotes hold a word together;
+   blanks and ; & | < > separate words. *)
+proc finalWord(s: []U8): INT;
+var n, i, r: INT; q: U8;
+begin
+    n := LEN(s);
+    while (n > 0) and separator(s[n - 1]) do DEC(n); end;
+    r := 0;
+    i := 0;
+    while i < n do
+        if separator(s[i]) then
+            INC(i);
+            r := i;
+        elsif (s[i] = '\'') or (s[i] = '"') then
+            q := s[i];
+            INC(i);
+            while (i < n) and (s[i] # q) do INC(i); end;
+            INC(i);
+        else
+            if (s[i] = '\\') and (i + 1 < n) then INC(i); end;
+            INC(i);
+        end;
+    end;
+    return r;
+end;
+
+(* alt-.: the last word of the line before in the history; again, that
+   swapped for the last word of the line before that. *)
+proc lastArg(again: BOOL);
+var h, a, n: INT; s: []U8;
+begin
+    if again then h := argHist - 1; else h := hidx - 1; end;
+    if h < 0 then
+        bell;
+        return;
+    end;
+    if again then
+        cut(argAt, argAt + argN);
+        cur := argAt;
+    end;
+    s := entry(h);
+    a := finalWord(s);
+    n := LEN(s);
+    while (n > a) and separator(s[n - 1]) do DEC(n); end;
+    argHist := h;
+    argAt := cur;
+    argN := n - a;
+    insert(s[a..n]);
+end;
+
+(* The newest entry from from down that holds q, and where; -1 if
+   none. *)
+proc find(q: []U8; from: INT): (INT, INT);
+var i, k: INT; s: []U8;
+begin
+    for i := from to 0 by -1 do
+        s := entry(i);
+        for k := LEN(s) - LEN(q) to 0 by -1 do
+            if s[k..k + LEN(q)] = q then return i, k; end;
+        end;
+    end;
+    return -1, 0;
+end;
+
+proc edge(c: U8): BOOL;
+begin
+    return oneOf(c, " \t;|&(){}<>");
+end;
+
+(* The line just entered ran the command word was, which wasn't found:
+   it is offered again, with was swapped for fix, as the next line's
+   suggestion. Nothing if was isn't a word of it. *)
+proc propose*(was, fix: []U8);
+var h: []U8; b: Buf.Buf; i, wn: INT;
+begin
+    if hist.len = 0 then return; end;
+    h := entry(hist.len - 1);
+    wn := LEN(was);
+    for i := 0 to LEN(h) - wn do
+        if ((i = 0) or edge(h[i - 1])) and ((i + wn = LEN(h)) or edge(h[i + wn])) and (h[i..i + wn] = was) then
+            Buf.init(ADR(b), Ccore.temps);
+            Buf.str(ADR(b), h[0..i]);
+            Buf.str(ADR(b), fix);
+            Buf.str(ADR(b), h[i + wn..LEN(h)]);
+            Str.free(Heap.heap, fixed);
+            fixed := Ccore.perm(Buf.bytes(ADR(b)));
+            return;
+        end;
+    end;
+end;
+
+(* The rest of the newest history entry that starts with the line and
+   is longer, when the cursor is at the end of a first line; "" if
+   none. A correction of the last line comes first, even on an empty
+   line. *)
+proc suggestion: []U8;
+var t, h: []U8; i: INT;
+begin
+    t := text();
+    if contLine or (cur # LEN(t)) then return ""; end;
+    if (LEN(offer) > LEN(t)) and (offer[0..LEN(t)] = t) then return offer[LEN(t)..LEN(offer)]; end;
+    if LEN(t) = 0 then return ""; end;
+    for i := hist.len - 1 to 0 by -1 do
+        h := entry(i);
+        if (LEN(h) > LEN(t)) and (h[0..LEN(t)] = t) then return h[LEN(t)..LEN(h)]; end;
+    end;
+    return "";
+end;
+
+(* The line, with the suggestion dim after it. *)
+proc draw;
+begin
+    show(suggestion(), "", 0);
+end;
+
+(* The suggestion taken into the line: all of it, or up to the end of
+   its next word. *)
+proc accept(word: BOOL);
+var s: []U8; i: INT;
+begin
+    s := suggestion();
+    if word then
+        i := 0;
+        while (i < LEN(s)) and not wordCh(s[i]) do INC(i); end;
+        while (i < LEN(s)) and wordCh(s[i]) do INC(i); end;
+        s := s[0..i];
+    end;
+    insert(s);
+end;
+
+(* The search: the entry from from down that holds q, if any, into the
+   line, and its number; fi if none. *)
+proc look(q: []U8; from, fi: INT): INT;
+var f, at: INT;
+begin
+    if LEN(q) = 0 then return fi; end;
+    f, at := find(q, from);
+    if f < 0 then return fi; end;
+    setLine(entry(f));
+    cur := at;
+    return f;
+end;
+
+(* ctrl-r: the key that ended the search, to be handled as usual. *)
+proc search: INT;
+var q: [128]U8; qn, fi, k: INT; orig: []U8; s: Buf.Buf;
+begin
+    qn := 0;
+    fi := hist.len;
+    orig := Ccore.perm(text());
+    defer Str.free(Heap.heap, orig);
+    Buf.init(ADR(s), Heap.heap);
+    defer Buf.done(ADR(s));
+    while true do
+        Buf.reset(ADR(s));
+        Buf.str(ADR(s), searchTag);
+        Buf.str(ADR(s), q[0..qn]);
+        show(Buf.bytes(ADR(s)), "", 0);
+        k := getKey();
+        match k of
+        | ctrlR: fi := look(q[0..qn], fi - 1, fi);
+        | ctrlH, del:
+            if qn > 0 then
+                DEC(qn);
+                fi := look(q[0..qn], hist.len - 1, hist.len);
+            end;
+        | ctrlC, ctrlG:
+            setLine(orig);
+            k := kNone;
+            break;
+        | else:
+            if (k >= 32) and (k < 256) and (k # del) then
+                if qn < LEN(q) then
+                    q[qn] := U8(k);
+                    INC(qn);
+                end;
+                if fi = hist.len then
+                    fi := look(q[0..qn], hist.len - 1, fi);
+                else
+                    fi := look(q[0..qn], fi, fi);
+                end;
+            else
+                break;
+            end;
+        end;
+    end;
+    if fi < hist.len then hidx := fi; end;
+    return k;
+end;
+
+(* -------------------------------------------------------- completion *)
+
+(* The unquoted text of [a, b) of t into o, starting inside quote q (0
+   for none). *)
+proc unquote(t: []U8; a, b: INT; q: U8; o: ^Buf.Buf);
+var i: INT; c: U8;
+begin
+    i := a;
+    while i < b do
+        c := t[i];
+        INC(i);
+        if q = '\'' then
+            if c # '\'' then
+                Buf.add(o, c);
+            elsif (i < b) and (t[i] = '\'') then
+                Buf.add(o, c);
+                INC(i);
+            else
+                q := 0;
+            end;
+        elsif q = '"' then
+            if (c = '\\') and (i < b) and oneOf(t[i], "\"\\$`") then
+                Buf.add(o, t[i]);
+                INC(i);
+            elsif c = '"' then
+                q := 0;
+            else
+                Buf.add(o, c);
+            end;
+        elsif (c = '\\') and (i < b) then
+            Buf.add(o, t[i]);
+            INC(i);
+        elsif (c = '\'') or (c = '"') then
+            q := c;
+        else
+            Buf.add(o, c);
+        end;
+    end;
+end;
+
+(* The word [ws, b) ended; a keyword decides what may follow. Any other
+   word joins the spans, unless it is a redirection's target or the
+   number in front of one. *)
+proc ended(s: ^Scan; b: INT);
+var t, w: []U8;
+begin
+    t := text();
+    w := t[s^.ws..b];
+    if s^.wcmd then
+        s^.cd := w = "cd";
+        s^.spans.n := 0;
+    end;
+    s^.expect := false;
+    if (w = "then") or (w = "do") or (w = "else") or (w = "begin") or (w = "repeat") then
+        s^.expect := true;
+        s^.expr := false;
+        s^.spans.n := 0;
+    elsif (w = "if") or (w = "while") or (w = "until") or (w = "case") or (w = "to") or (w = "downto") or (w = "in") then
+        s^.expr := true;
+        s^.spans.n := 0;
+    elsif s^.redir then
+        s^.redir := false;
+    elsif not s^.expr and not ((b < LEN(t)) and ((t[b] = '<') or (t[b] = '>'))) and (s^.spans.n < LEN(s^.spans.a)) then
+        s^.spans.a[s^.spans.n] := s^.ws;
+        s^.spans.b[s^.spans.n] := b;
+        INC(s^.spans.n);
+    end;
+end;
+
+(* The line up to the cursor, scanned for the word before it. An
+   expression follows :=, a Pascal keyword that takes one, or a
+   parenthesis right after a word (a call, or $(); in one, any
+   character not of a name ends a word. The arguments of a cd are
+   directories. Each parenthesis pushes the state onto nest, and the
+   closing one pops it. The spans are the words of the command so far,
+   redirections left out; none unless the word is an argument. *)
+proc scan(s: ^Scan): Context;
+var t: []U8; i: INT; c: U8;
+begin
+    t := text();
+    s^ := {expect: true};
+    i := 0;
+    while i < cur do
+        c := t[i];
+        if s^.q = '\'' then
+            if c = '\'' then s^.q := 0; end;
+            INC(i);
+            continue;
+        end;
+        if s^.q = '"' then
+            if c = '\\' then
+                INC(i);
+            elsif c = '"' then
+                s^.q := 0;
+            end;
+            INC(i);
+            continue;
+        end;
+        if (c = ':') and (i + 1 < cur) and (t[i + 1] = '=') then
+            if s^.inWord then ended(s, i); end;
+            s^.inWord := false;
+            s^.expect := false;
+            s^.expr := true;
+            s^.spans.n := 0;
+            INC(i, 2);
+            continue;
+        end;
+        if oneOf(c, " \t|;&<>`()") or s^.expr and not (identCh(c) or (c = '\'') or (c = '"')) then
+            if s^.inWord then ended(s, i); end;
+            match c of
+            | '(':
+                s^.nest := s^.nest shl 1;
+                if s^.expr then s^.nest := s^.nest | 1; end;
+                s^.expr := s^.expr or s^.inWord;
+                s^.expect := not s^.expr;
+                s^.spans.n := 0;
+            | ')':
+                s^.expr := (s^.nest & 1) # 0;
+                s^.nest := s^.nest shr 1;
+                s^.expect := false;
+                s^.spans.n := 0;
+            | '<', '>':
+                if not s^.expr then
+                    s^.expect := false;
+                    s^.redir := true;
+                end;
+            | '|', ';', '&', '`':
+                (* but not the & of >&2 *)
+                if (c # '&') or (i = 0) or not ((t[i - 1] = '<') or (t[i - 1] = '>')) then
+                    s^.expect := true;
+                    s^.expr := false;
+                    s^.spans.n := 0;
+                    s^.redir := false;
+                end;
+            | else:
+            end;
+            s^.inWord := false;
+            INC(i);
+            continue;
+        end;
+        if not s^.inWord then
+            s^.ws := i;
+            s^.inWord := true;
+            s^.wcmd := s^.expect and not s^.expr;
+        end;
+        if c = '\\' then
+            INC(i);
+        elsif (c = '\'') or (c = '"') then
+            s^.q := c;
+            s^.qs := i + 1;
+        end;
+        INC(i);
+    end;
+    if not s^.inWord then s^.ws := cur; end;
+    if s^.redir or s^.expr or s^.expect then s^.spans.n := 0; end;
+    if s^.expr then
+        if s^.q = 0 then return cxExpr; end;
+        return cxArg;
+    elsif s^.expect then
+        return cxCommand;
+    elsif s^.cd then
+        return cxDir;
+    end;
+    return cxArg;
+end;
+
+(* s as it must be typed, inside quote q, into o; home says a leading ~
+   is HOME. *)
+proc escape(s: []U8; q: U8; home: BOOL; o: ^Buf.Buf);
+var i: INT;
+begin
+    for i := 0 to LEN(s) - 1 do
+        if q = '\'' then
+            if s[i] = '\'' then Buf.add(o, '\''); end;
+        elsif q = '"' then
+            if oneOf(s[i], "\"\\$`") then Buf.add(o, '\\'); end;
+        elsif oneOf(s[i], " \t;|&<>`'\"$\\*?[(){}") or (i = 0) and (s[i] = '~') and not home then
+            Buf.add(o, '\\');
+        end;
+        Buf.add(o, s[i]);
+    end;
+end;
+
+(* [a, cur) made s. *)
+proc replace(a: INT; s: []U8);
+begin
+    cut(a, cur);
+    insert(s);
+end;
+
+(* v sorted, and each candidate once. *)
+proc sortOut(v: ^Vals.Vec);
+var a: []Ccore.Val; i, j, k: INT; t: Ccore.Val;
+begin
+    a := Vals.all(v);
+    for i := 1 to LEN(a) - 1 do
+        t := a[i];
+        j := i;
+        while (j > 0) and (Str.cmp(Ccore.bytes(a[j - 1]), Ccore.bytes(t)) > 0) do
+            a[j] := a[j - 1];
+            DEC(j);
+        end;
+        a[j] := t;
+    end;
+    k := 0;
+    for i := 0 to LEN(a) - 1 do
+        if (k = 0) or not Ccore.same(a[k - 1], a[i]) then
+            a[k] := a[i];
+            INC(k);
+        end;
+    end;
+    Vals.resize(v, k);
+end;
+
+(* What a list shows of a candidate: what follows the skip bytes of
+   directory already typed. *)
+proc tail(v: Ccore.Val; skip: INT): []U8;
+var s: []U8;
+begin
+    s := Ccore.bytes(v);
+    if skip > LEN(s) then skip := LEN(s); end;
+    return s[skip..LEN(s)];
+end;
+
+(* The colour a candidate is listed in: a directory blue, an executable
+   file green. *)
+proc listColour(v: Ccore.Val): INT;
+var s, home: []U8; b: Buf.Buf;
+begin
+    s := Ccore.bytes(v);
+    if LEN(s) = 0 then return hPlain; end;
+    if s[LEN(s) - 1] = '/' then return hDir; end;
+    Buf.init(ADR(b), Ccore.temps);
+    if (LEN(s) > 1) and (s[0] = '~') and (s[1] = '/') then
+        home := Sys.env("HOME");    (* HOME from the environment is close enough *)
+        if LEN(home) = 0 then return hPlain; end;
+        Buf.str(ADR(b), home);
+        Buf.str(ADR(b), s[1..LEN(s)]);
+    else
+        Buf.str(ADR(b), s);
+    end;
+    if Sys.access(Buf.bytes(ADR(b)), {Sys.executing}) = 0 then return hExe; end;
+    return hPlain;
+end;
+
+(* The first n bytes of candidate s in place of the word, as it must be
+   typed; whole ends the word too, with its quote and a blank, unless it
+   is a directory. *)
+proc take(s: []U8; whole: BOOL);
+var e: Buf.Buf; a: INT; q: U8;
+begin
+    Buf.init(ADR(e), Ccore.temps);
+    a := wd.a;
+    q := wd.q;
+    if wd.isVar then
+        Buf.str(ADR(e), s);
+    elsif (wd.pre > 0) and ((LEN(s) < wd.pre) or (s[0..wd.pre] # wd.typed[0..wd.pre])) then
+        (* a fuzzy match changed what lies before the open quote: the
+           whole word typed again, escaped instead of quoted *)
+        a := wd.ws;
+        q := 0;
+        escape(s, 0, wd.home, ADR(e));
+    else
+        escape(s[wd.pre..LEN(s)], q, wd.home, ADR(e));
+    end;
+    if whole and (LEN(s) > 0) and (s[LEN(s) - 1] # '/') then
+        if (q # 0) and not wd.isVar then Buf.add(ADR(e), q); end;
+        if (q = 0) or not wd.isVar then Buf.add(ADR(e), ' '); end;
+    end;
+    replace(a, Buf.bytes(ADR(e)));
+end;
+
+(* The rows topRow to topRow + vis - 1 of the menu, and below them which
+   rows they are, if not all. *)
+proc lay(m: ^Menu; v: []Ccore.Val; skip: INT);
+var b: Buf.Buf; r, c, i, j, n, cls, shown, col, cw: INT; p: []U8; ch: I32;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    shown := m^.vis;
+    for r := m^.topRow to m^.topRow + m^.vis - 1 do
+        if r > m^.topRow then Buf.str(ADR(b), "\r\n"); end;
+        for c := 0 to m^.ncol - 1 do
+            i := c * m^.nrow + r;
+            if i >= LEN(v) then break; end;
+            p := tail(v[i], skip);
+            (* no cell may be as wide as the screen *)
+            j := 0;
+            col := 0;
+            while j < LEN(p) do
+                ch, n := Str.decode(p[j..LEN(p)]);
+                if ch < 32 then cw := 1; else cw := Width.width(ch); end;
+                if col + cw > m^.w - 1 then break; end;
+                INC(col, cw);
+                INC(j, n);
+            end;
+            p := p[0..j];
+            cls := hPlain;
+            if Ccore.opts^.colour then cls := listColour(v[i]); end;
+            if cls # hPlain then colourOn(ADR(b), cls); end;
+            if i = m^.sel then Buf.str(ADR(b), "\x1b[7m"); end;
+            Buf.str(ADR(b), p);
+            if (cls # hPlain) or (i = m^.sel) then Buf.str(ADR(b), "\x1b[0m"); end;
+            if (c < m^.ncol - 1) and (i + m^.nrow < LEN(v)) then
+                for j := columns(p) to m^.cw - 1 do Buf.add(ADR(b), ' '); end;
+            end;
+        end;
+    end;
+    if m^.vis < m^.nrow then
+        Buf.str(ADR(b), "\r\n\x1b[2mrows ");
+        num(ADR(b), m^.topRow + 1);
+        Buf.add(ADR(b), '-');
+        num(ADR(b), m^.topRow + m^.vis);
+        Buf.str(ADR(b), " of ");
+        num(ADR(b), m^.nrow);
+        Buf.str(ADR(b), "\x1b[0m");
+        INC(shown);
+    end;
+    if m^.h < 1 then shown := 0; end;
+    show("", Buf.bytes(ADR(b)), shown);
+end;
+
+proc pick(m: ^Menu; v: []Ccore.Val; i: INT);
+begin
+    m^.sel := i;
+    take(Ccore.bytes(v[i]), false);
+    if i mod m^.nrow < m^.topRow then m^.topRow := i mod m^.nrow; end;
+    if i mod m^.nrow >= m^.topRow + m^.vis then m^.topRow := i mod m^.nrow - m^.vis + 1; end;
+end;
+
+(* Tab with nothing to put in: the candidates as a menu under the line,
+   in columns, sorted down each column. Tab and shift-Tab step through
+   them, and the arrows move once one is selected; the selection stands
+   in for the word. Enter takes it, ctrl-g and ctrl-c put the word
+   back, and any other key takes it and is returned, to be handled as
+   usual. A menu taller than the screen shows a window of rows around
+   the selection. *)
+proc menu(v: []Ccore.Val; skip: INT): INT;
+var m: Menu; k, i, n: INT; orig: []U8;
+begin
+    m := {w: cols(), sel: -1};
+    for i := 0 to LEN(v) - 1 do
+        n := columns(tail(v[i], skip));
+        if n > m.cw then m.cw := n; end;
+    end;
+    INC(m.cw, 2);
+    m.ncol := m.w div m.cw;
+    if m.ncol < 1 then m.ncol := 1; end;
+    m.nrow := (LEN(v) + m.ncol - 1) div m.ncol;
+    (* the rows the screen has left under the line, one of them for
+       saying which rows show when not all do *)
+    m.h := screenRows() - (startCol + columns(text())) div m.w - 1;
+    if m.nrow <= m.h then
+        m.vis := m.nrow;
+    elsif m.h >= 2 then
+        m.vis := m.h - 1;
+    else
+        m.vis := 1;
+    end;
+    orig := Ccore.perm(text()[wd.ws..cur]);
+    defer Str.free(Heap.heap, orig);
+    while true do
+        lay(ADR(m), v, skip);
+        k := getKey();
+        match k of
+        | tab: pick(ADR(m), v, (m.sel + 1) mod LEN(v));
+        | kBackTab:
+            if m.sel <= 0 then pick(ADR(m), v, LEN(v) - 1); else pick(ADR(m), v, m.sel - 1); end;
+        | kDown:
+            if m.sel < 0 then break; end;
+            pick(ADR(m), v, (m.sel + 1) mod LEN(v));
+        | kUp:
+            if m.sel < 0 then break; end;
+            if m.sel = 0 then pick(ADR(m), v, LEN(v) - 1); else pick(ADR(m), v, m.sel - 1); end;
+        | kRight:
+            if m.sel < 0 then break; end;
+            if m.sel + m.nrow < LEN(v) then pick(ADR(m), v, m.sel + m.nrow); end;
+        | kLeft:
+            if m.sel < 0 then break; end;
+            if m.sel >= m.nrow then pick(ADR(m), v, m.sel - m.nrow); end;
+        | ctrlJ, ctrlM:
+            if m.sel < 0 then break; end;
+            take(Ccore.bytes(v[m.sel]), true);
+            k := kNone;
+            break;
+        | ctrlC, ctrlG:
+            replace(wd.ws, orig);
+            k := kNone;
+            break;
+        | else: break;
+        end;
+    end;
+    return k;
+end;
+
+(* What fn offers for the word before the cursor, into out, sorted
+   unless ranked; b gets the word, unquoted, and wd says where it
+   lies. *)
+proc candidates(fn: Completer; b: ^Buf.Buf; out: ^Vals.Vec);
+var t: []U8; s: Scan; cx: Context; e: Buf.Buf; words: Vals.Vec; i, st: INT;
+begin
+    t := text();
+    cx := scan(ADR(s));
+    Vals.init(ADR(words), Ccore.temps);
+    for i := 0 to s.spans.n - 1 do
+        Buf.init(ADR(e), Ccore.temps);
+        unquote(t, s.spans.a[i], s.spans.b[i], 0, ADR(e));
+        Vals.push(ADR(words), Ccore.strVal(Buf.bytes(ADR(e))));
+    end;
+    (* $name: a variable *)
+    st := cur;
+    while (st > s.ws) and identCh(t[st - 1]) do DEC(st); end;
+    wd := {ws: s.ws, q: s.q};
+    wd.isVar := (s.q # '\'') and (st > s.ws) and (t[st - 1] = '$') and ((st - 1 = s.ws) or (t[st - 2] # '\\'))
+        and ((st = cur) or not ((t[st] >= '0') and (t[st] <= '9')));
+    wd.home := (s.q = 0) and (s.ws < LEN(t)) and (t[s.ws] = '~');
+    if wd.isVar then
+        wd.a := st - 1;
+        wd.ws := wd.a;
+        Buf.str(b, t[wd.a..cur]);
+        cx := cxArg;
+        Vals.reset(ADR(words));
+    else
+        unquote(t, s.ws, cur, 0, b);
+        wd.a := s.ws;
+        if s.q # 0 then
+            wd.a := s.qs;
+            Buf.init(ADR(e), Ccore.temps);
+            unquote(t, s.qs, cur, s.q, ADR(e));
+            wd.pre := b^.len - e.len;
+        end;
+    end;
+    wd.typed := Buf.bytes(b);
+    if not fn(wd.typed, cx, Vals.all(ADR(words)), out) then sortOut(out); end;
+end;
+
+(* What Tab would offer at the end of the line s, as a list, without
+   touching the line being edited: a complete function may ask while
+   Tab waits on it. For completions(). *)
+proc completions*(s: []U8; fn: Completer): Ccore.Val;
+var b, keepLine: Buf.Buf; out: Vals.Vec; keepCur: INT; keepWd: Word;
+begin
+    keepLine := line;
+    keepCur := cur;
+    keepWd := wd;
+    Buf.init(ADR(line), Ccore.temps);
+    Buf.str(ADR(line), s);
+    cur := LEN(s);
+    Buf.init(ADR(b), Ccore.temps);
+    Vals.init(ADR(out), Ccore.temps);
+    candidates(fn, ADR(b), ADR(out));
+    line := keepLine;
+    cur := keepCur;
+    wd := keepWd;
+    return Ccore.listVal(ADR(out));
+end;
+
+(* Tab: the word before the cursor completed. A key the menu didn't
+   use, or kNone. *)
+proc complete: INT;
+var b: Buf.Buf; out: Vals.Vec; v: []Ccore.Val; m: Ccore.Mark; first, s: []U8; i, k, keep, skip: INT;
+begin
+    if hooks^.complete = nil then
+        bell;
+        return kNone;
+    end;
+    m := Ccore.mark();
+    defer Ccore.release(m);
+    Buf.init(ADR(b), Ccore.temps);
+    Vals.init(ADR(out), Ccore.temps);
+    candidates(hooks^.complete, ADR(b), ADR(out));
+    v := Vals.all(ADR(out));
+    skip := 0;
+    if not wd.isVar then
+        for i := 0 to b.len - 1 do
+            if Buf.bytes(ADR(b))[i] = '/' then skip := i + 1; end;
+        end;
+    end;
+    if LEN(v) = 0 then
+        bell;
+        return kNone;
+    end;
+    (* the prefix every candidate shares *)
+    first := Ccore.bytes(v[0]);
+    keep := LEN(first);
+    for i := 1 to LEN(v) - 1 do
+        s := Ccore.bytes(v[i]);
+        k := 0;
+        while (k < keep) and (k < LEN(s)) and (first[k] = s[k]) do INC(k); end;
+        keep := k;
+    end;
+    while (keep > 0) and (keep < LEN(first)) and inner(first[keep]) do DEC(keep); end;
+    if (keep > b.len) or (LEN(v) = 1) then
+        take(first[0..keep], LEN(v) = 1);
+        return kNone;
+    end;
+    return menu(v, skip);
+end;
+
+(* ------------------------------------------------- ctrl-x ctrl-e *)
+
+(* The line edited in the user's editor, through a file in /tmp. What
+   the editor left is echoed and becomes the line, unless it is
+   blank; true then, and it goes into the history a line at a time. *)
+proc inEditor: BOOL;
+var p: Buf.Buf; b: Buf.Buf; path, s: []U8; fd, i, j, n: INT;
+begin
+    if hooks^.editor = nil then
+        bell;
+        return false;
+    end;
+    Buf.init(ADR(p), Ccore.temps);
+    Buf.str(ADR(p), "/tmp/concha-");
+    num(ADR(p), Sys.pid());
+    Buf.str(ADR(p), ".cn");
+    path := Buf.bytes(ADR(p));
+    _ := Sys.remove(path);
+    fd := Sys.openMode(path, {Sys.writing, Sys.creating, Sys.exclusive}, Ccore.permOwn);
+    if fd < 0 then
+        bell;
+        return false;
+    end;
+    Ccore.put(fd, text());
+    Ccore.put(fd, "\n");
+    Sys.close(fd);
+    finish;
+    reset;
+    hooks^.editor(path);
+    Buf.init(ADR(b), Ccore.temps);
+    _ := Ccore.readFile(path, ADR(b));
+    _ := Sys.remove(path);
+    rawOn;
+    s := Buf.bytes(ADR(b));
+    n := LEN(s);
+    while (n > 0) and oneOf(s[n - 1], " \t\n\r") do DEC(n); end;
+    s := s[0..n];
+    if blankLine(s) then
+        setLine("");
+        if hooks^.reprompt # nil then hooks^.reprompt(); end;
+        queryCol;
+        curRow := 0;
+        return false;
+    end;
+    reset;
+    Ccore.put(2, s);
+    Ccore.put(2, "\n");
+    i := 0;
+    while i < n do
+        j := i;
+        while (j < n) and (s[j] # '\n') do INC(j); end;
+        histAdd(s[i..j]);
+        i := j + 1;
+    end;
+    setLine(s);
+    return true;
+end;
+
+(* ------------------------------------------------------- the editor *)
+
+(* Does key k type itself? *)
+proc typed(k: INT): BOOL;
+begin
+    return ((k >= 32) and (k < 127)) or ((k >= 128) and (k < 256));
+end;
+
+(* A line typed at the terminal, more saying it continues the one
+   before: what was got, and the line, ending in a newline, good until
+   the next call. *)
+proc editLine*(more: BOOL): (Got, []U8);
+var k, last: INT; c: U8; step: BOOL;
+begin
+    contLine := more;
+    (* a correction lasts the one line after the line it corrects *)
+    Str.free(Heap.heap, offer);
+    offer := fixed;
+    fixed := "";
+    rawOn;
+    queryCol;
+    Buf.reset(ADR(line));
+    cur := 0;
+    curRow := 0;
+    hidx := hist.len;
+    undoClear;
+    last := 0;
+    killing := false;
+    draw;
+    while true do
+        k := getKey();
+        if k = ctrlX then
+            match getKey() of
+            | ctrlE: k := kInEditor;
+            | ctrlU: k := ctrlUnderscore;
+            | else: k := kNone;
+            end;
+        end;
+        wasKilling := killing;
+        killing := false;
+        (* every change but ctrl-_ may be undone; a run of typing is one
+           change *)
+        step := (k # ctrlUnderscore) and not (typed(k) and typed(last));
+        if step then undoPush; end;
+        if k = ctrlR then
+            k := search();
+            draw;
+        end;
+        if k = tab then k := complete(); end;
+        match k of
+        | -1:
+            finish;
+            reset;
+            return gotEof, "";
+        | ctrlJ, ctrlM:
+            finish;
+            reset;
+            histAdd(text());
+            Buf.add(ADR(line), '\n');
+            return gotLine, text();
+        | ctrlC:
+            cur := line.len;
+            plain;
+            Ccore.put(2, "^C\r\n");
+            reset;
+            return gotCancel, "";
+        | ctrlD:
+            if line.len = 0 then
+                finish;
+                reset;
+                return gotEof, "";
+            end;
+            cut(cur, nextB(cur));
+        | ctrlA, kHome: cur := 0;
+        | ctrlE, kEnd:
+            if cur = line.len then accept(false); else cur := line.len; end;
+        | ctrlB, kLeft: cur := prevB(cur);
+        | ctrlF, kRight:
+            if cur = line.len then accept(false); else cur := nextB(cur); end;
+        | ctrlH, del: cut(prevB(cur), cur);
+        | kDel: cut(cur, nextB(cur));
+        | ctrlK: kill(cur, line.len, false);
+        | ctrlU: kill(0, cur, true);
+        | ctrlW, kKillWord: kill(wordLeft(cur), cur, true);
+        | kKillWordR: kill(cur, wordRight(cur), false);
+        | ctrlY: insert(Buf.bytes(ADR(killed)));
+        | ctrlUnderscore: undoPop;
+        | kWordL: cur := wordLeft(cur);
+        | kWordR:
+            if cur = line.len then accept(true); else cur := wordRight(cur); end;
+        | kUpWord, kDownWord, kCapWord: caseWord(k);
+        | kSwapWords: swapWords;
+        | kLastArg: lastArg(last = kLastArg);
+        | ctrlP, kUp: histMove(-1);
+        | ctrlN, kDown: histMove(1);
+        | ctrlL:
+            Ccore.put(2, "\x1b[H\x1b[2J");
+            if hooks^.reprompt # nil then hooks^.reprompt(); end;
+            queryCol;
+            curRow := 0;
+        | ctrlT:
+            if (cur > 0) and (line.len > 1) then
+                if cur = line.len then DEC(cur); end;
+                c := text()[cur - 1];
+                text()[cur - 1] := text()[cur];
+                text()[cur] := c;
+                INC(cur);
+            end;
+        | kInEditor:
+            if inEditor() then
+                Buf.add(ADR(line), '\n');
+                return gotLine, text();
+            end;
+        | else:
+            if typed(k) then insertByte(U8(k)); end;
+        end;
+        (* a step that changed nothing is no step *)
+        if step and (nundo > 0) and (undo[nundo - 1].s = text()) then
+            DEC(nundo);
+            Str.free(Heap.heap, undo[nundo].s);
+        end;
+        last := k;
+        draw;
+    end;
+end;
+
+begin
+    hooks := ADR(hooksAt);
+    Buf.init(ADR(line), Heap.heap);
+    Buf.init(ADR(killed), Heap.heap);
+    Names.init(ADR(hist), Heap.heap);
+end Cedit.
