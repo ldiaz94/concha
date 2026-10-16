@@ -54,8 +54,8 @@ before it is started, not after.
         against the Pascal on 42 scripts of expressions, statements
         and errors, by the globals they leave and what they say.
   - [x] (b) words, expansion, redirections, processes, pipes, jobs,
-        signals and traps; `Cglob`. `Ckern` is back for one call,
-        execve: `Sys.exec` gives a program every signal as it is at
+        signals and traps; `Cglob`. `Ckern` was back for one call,
+        execve, until raz 0.17.2's `Sys.execve`: `Sys.exec` gives a program every signal as it is at
         first, ignored ones too, where `trap ''` and a script's
         background jobs keep theirs, and looks along the process's
         PATH, not the shell's (RAZ-NOTES.md). A signal is seen where

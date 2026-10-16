@@ -18,10 +18,10 @@ what was wanted, what concha does instead, and how much it cost.
   ignores stays ignored (`trap '' HUP` before a long command, a
   script's background job ignoring SIGINT), and the program is looked
   for along the shell's `PATH` variable, which needn't be exported.
-  concha has `Ckern.execve`, a `SYSCALL` in a file of its own, and
+  concha had `Ckern.execve`, a `SYSCALL` in a file of its own, and
   does the search, and sh's ENOEXEC fallback, itself. Proposed as
-  `Sys.execve(path, args, env)`, no more than the kernel's, in raz's
-  `PROPOSALS.md`, "exec as a shell runs a program".
+  `Sys.execve(path, args, env)`, no more than the kernel's, and in
+  raz 0.17.2; `Ckern` went with it.
 
 ## The language
 

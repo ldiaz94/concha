@@ -1,11 +1,10 @@
 # concha internals
 
-concha is written in raz (`man raz`), in twelve modules, each depending
+concha is written in raz (`man raz`), in eleven modules, each depending
 only on those above it in this table:
 
 | module | lines | job |
 |--------|-------|-----|
-| `Ckern` | ~20 | the one system call `Sys` lacks as a shell needs it: execve |
 | `Ccore` | ~610 | arena, values, errors, output, files, the distance between names |
 | `Csyntax` | ~1780 | scanner, parser, syntax tree, the notes the queries read |
 | `Cfuzzy` | ~120 | wuzzy's fuzzy matcher, which ranks completions |
@@ -25,11 +24,11 @@ outside (fuzzy(3), hora(3)), and `Cvars`, `Cglob`, `Cclock` and
 only. `PLAN.md` tells the port, and the few differences from the Pascal
 that were meant.
 
-Everything but execve goes through raz's library: `Sys` for the system
-calls (the terminal, process groups, signals, limits), `Buf` and `Vec`
-for growable buffers and arrays, `Fmt` for messages. `Ckern` is one file
-per target, `Ckern.linux-x86_64.raz`. Nothing links libc, so `~user` is
-found by reading `/etc/passwd` (`Cvars.passwd`).
+Everything goes through raz's library: `Sys` for the system calls (the
+terminal, process groups, signals, limits, and execve, which leaves an
+ignored signal ignored as `trap ''` wants), `Buf` and `Vec` for
+growable buffers and arrays, `Fmt` for messages. Nothing links libc, so
+`~user` is found by reading `/etc/passwd` (`Cvars.passwd`).
 
 Build with `make`, which wants the raz on `PATH` to be of the version
 `RAZVERSION` in the `Makefile` names, and builds with `-Werror`; `make

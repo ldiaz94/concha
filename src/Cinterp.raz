@@ -17,11 +17,11 @@
 
    Depends on Ccore for values and errors, on Csyntax for the tree, on
    Cvars for the variables and procedures, on Cglob for patterns, on
-   Cclock for time(), on Ccomplete and Cedit for completion and "did
-   you mean", and on Ckern for execve. Left out: the command line and
-   the REPL, which are Concha's. *)
+   Cclock for time(), and on Ccomplete and Cedit for completion and
+   "did you mean". Left out: the command line and the REPL, which are
+   Concha's. *)
 module Cinterp;
-import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Cedit, Ccomplete, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
+import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Cedit, Ccomplete, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
 
 const
     MaxSaves = 256;    (* fds saved around a builtin's redirections *)
@@ -670,28 +670,9 @@ begin
     return pid, nil;
 end;
 
-(* s as a C string, in the arena. *)
-proc cstr(s: []U8): ^U8;
-var p: ^U8;
-begin
-    p := Ccore.alloc(LEN(s) + 1);
-    COPY(p[0..LEN(s)], s);
-    p[LEN(s)] := 0;
-    return p;
-end;
-
-(* The strings a as a C array, ended by nil, in the arena. *)
-proc cstrs(a: [][]U8): ^^U8;
-var p: ^^U8; i: INT;
-begin
-    p := ^^U8(Ccore.alloc((LEN(a) + 1) * SIZE(^U8)));
-    for i := 0 to LEN(a) - 1 do p[i] := cstr(a[i]); end;
-    p[LEN(a)] := nil;
-    return p;
-end;
-
-(* The environment of a program the shell runs: its exported globals. *)
-proc buildEnv: ^^U8;
+(* The environment of a program the shell runs: its exported globals,
+   as NAME=value. *)
+proc buildEnv: [][]U8;
 var env: Names.Vec; g: []Cvars.Var; b: Buf.Buf; i: INT;
 begin
     Names.init(ADR(env), Ccore.temps);
@@ -705,23 +686,22 @@ begin
             Names.push(ADR(env), Buf.bytes(ADR(b)));
         end;
     end;
-    return cstrs(Names.all(ADR(env)));
+    return Names.all(ADR(env));
 end;
 
-(* For tryExec: the file f run with the arguments av, n of them after
-   its name, and the environment ev; a file the kernel can't run
-   (ENOEXEC) is a script for /bin/sh. err is why it failed, unless f
-   wasn't there. *)
-proc attempt(f: []U8; av, ev: ^^U8; n: INT; err: ^INT);
-var sh: ^^U8; e, k: INT;
+(* For tryExec: the file f run with the arguments av, its name first,
+   and the environment ev; a file the kernel can't run (ENOEXEC) is a
+   script for /bin/sh. err is why it failed, unless f wasn't there. *)
+proc attempt(f: []U8; av, ev: [][]U8; err: ^INT);
+var sh: Names.Vec; e, k: INT;
 begin
-    e := -Ckern.execve(cstr(f), av, ev);
+    e := -Sys.execve(f, av, ev);
     if e = Ccore.errNoExec then
-        sh := ^^U8(Ccore.alloc((n + 3) * SIZE(^U8)));
-        sh[0] := cstr("/bin/sh");
-        sh[1] := cstr(f);
-        for k := 1 to n + 1 do sh[k + 1] := av[k]; end;    (* the nil too *)
-        _ := Ckern.execve(sh[0], sh, ev);
+        Names.init(ADR(sh), Ccore.temps);
+        Names.push(ADR(sh), "/bin/sh");
+        Names.push(ADR(sh), f);
+        for k := 1 to LEN(av) - 1 do Names.push(ADR(sh), av[k]); end;
+        _ := Sys.execve("/bin/sh", Names.all(ADR(sh)), ev);
     end;
     if e # Ccore.errNoEnt then err^ := e; end;
 end;
@@ -735,17 +715,17 @@ end;
 (* The program args name run in this process's place, looked for along
    PATH; if it can't be, why not said, and 126 or 127. *)
 proc tryExec(args: []Ccore.Val): INT;
-var words: Names.Vec; av, ev: ^^U8; name, path, dir: []U8; i, err: INT; b: Buf.Buf; slash, more: BOOL;
+var words: Names.Vec; av, ev: [][]U8; name, path, dir: []U8; i, err: INT; b: Buf.Buf; slash, more: BOOL;
 begin
     Names.init(ADR(words), Ccore.temps);
     for i := 0 to LEN(args) - 1 do Names.push(ADR(words), Ccore.bytes(Ccore.toStr(args[i]))); end;
-    av := cstrs(Names.all(ADR(words)));
+    av := Names.all(ADR(words));
     ev := buildEnv();
-    name := Names.all(ADR(words))[0];
+    name := av[0];
     slash := Str.find(name, "/") >= 0;
     err := Ccore.errNoEnt;
     if slash then
-        attempt(name, av, ev, LEN(args) - 1, ADR(err));
+        attempt(name, av, ev, ADR(err));
     elsif LEN(name) > 0 then
         path := Cvars.searchPath();
         more := true;
@@ -756,7 +736,7 @@ begin
             Buf.str(ADR(b), dir);
             Buf.add(ADR(b), '/');
             Buf.str(ADR(b), name);
-            attempt(Buf.bytes(ADR(b)), av, ev, LEN(args) - 1, ADR(err));
+            attempt(Buf.bytes(ADR(b)), av, ev, ADR(err));
         end;
     end;
     Ccore.errHead;
