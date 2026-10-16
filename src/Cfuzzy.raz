@@ -1,0 +1,121 @@
+(* Cfuzzy: how well a few typed letters match a name, as wuzzy(1)
+   scores them; concha ranks completions by it.
+
+   A term matches a name when its letters appear in it in order, not
+   necessarily together. The score rewards letters that start a word,
+   camelCase humps and runs, and charges for the gaps between, so the
+   better of two matches scores higher. A term with a capital letter
+   matches case exactly; one without ignores ASCII case.
+
+   It depends on nothing. Left out from fuzzy(3): the marks of which
+   letters matched, which concha never asked for. *)
+module Cfuzzy;
+
+const
+    (* A matched letter earns hit, plus a bonus for where it falls;
+       a gap between matched letters costs gapOpen, then gapExtend for
+       every further letter skipped. *)
+    hit = 16;
+    boundary = 8;    (* the first letter of a word *)
+    camel = 7;    (* aB, or a1 *)
+    consecutive = 4;    (* right after the previous match *)
+    gapOpen = 3;
+    gapExtend = 1;
+
+(* Does t hold a capital letter, and so match case exactly? *)
+proc exact*(t: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(t) - 1 do
+        if (t[i] >= 'A') and (t[i] <= 'Z') then return true; end;
+    end;
+    return false;
+end;
+
+proc lower(c: U8): U8;
+begin
+    if (c >= 'A') and (c <= 'Z') then return c + 32; end;
+    return c;
+end;
+
+proc same(a, b: U8; exact: BOOL): BOOL;
+begin
+    if exact then return a = b; end;
+    return lower(a) = lower(b);
+end;
+
+(* The class of a byte: 0 a separator, 1 lower case, 2 upper case, 3 a
+   digit. The bytes of UTF-8 count as lower case, so that words in
+   other alphabets hold together. *)
+proc kind(c: U8): INT;
+begin
+    if ((c >= 'a') and (c <= 'z')) or (c >= 128) then
+        return 1;
+    elsif (c >= 'A') and (c <= 'Z') then
+        return 2;
+    elsif (c >= '0') and (c <= '9') then
+        return 3;
+    end;
+    return 0;
+end;
+
+proc bonus(prev, this: INT): INT;
+begin
+    if (prev = 0) and (this # 0) then
+        return boundary;
+    elsif (prev = 1) and (this = 2) then
+        return camel;
+    elsif ((prev = 1) or (prev = 2)) and (this = 3) then
+        return camel;
+    end;
+    return 0;
+end;
+
+(* The score of term t against s, or -1 if it doesn't match; exact as
+   exact(t) says. A forward scan finds where the earliest occurrence
+   ends, and a backward scan from there the latest place it can begin:
+   the window between is the tightest match, and is scored going
+   forward. *)
+proc score*(s, t: []U8; exact: BOOL): INT;
+var i, j, b, e, last, sc, gain: INT;
+begin
+    i := 0;
+    j := 0;
+    while (i < LEN(s)) and (j < LEN(t)) do
+        if same(s[i], t[j], exact) then INC(j); end;
+        INC(i);
+    end;
+    if j < LEN(t) then return -1; end;
+    e := i;
+    j := LEN(t);
+    while j > 0 do
+        DEC(i);
+        if same(s[i], t[j - 1], exact) then DEC(j); end;
+    end;
+    b := i;
+    sc := 0;
+    j := 0;
+    last := b;
+    for i := b to e - 1 do
+        if (j < LEN(t)) and same(s[i], t[j], exact) then
+            if i = 0 then
+                gain := bonus(0, kind(s[i]));
+            else
+                gain := bonus(kind(s[i - 1]), kind(s[i]));
+            end;
+            if j = 0 then
+                gain := 2 * gain;
+            elsif i = last + 1 then
+                INC(gain, consecutive);
+            else
+                DEC(sc, gapOpen + gapExtend * (i - last - 2));
+            end;
+            INC(sc, hit + gain);
+            last := i;
+            INC(j);
+        end;
+    end;
+    return sc;
+end;
+
+end Cfuzzy.
