@@ -1,0 +1,200 @@
+(* Cglob: patterns, and the names in the file system they match.
+
+   A pattern is sh's: * any run of bytes, ? any one byte, [...] a class
+   of bytes, with ranges a-z and ! or ^ first for those not in it, and
+   \ to take the next byte as it is. A [ that a ] doesn't close is
+   itself. A name starting with a dot is matched only by a pattern
+   starting with one. The names a glob finds come sorted, byte by byte.
+
+   Depends on Ccore for the arena and values, and on Sys for
+   directories. Left out: ** and {a,b}, which sh hasn't either. *)
+module Cglob;
+import Sys, Buf, Str, Ccore, Vals := Vec(Ccore.Val);
+
+type
+    Kind* = (none, file, dir);    (* what a path names; file is anything but a directory *)
+
+(* The class at p[i] = '[': where it ends, and whether c is in it. *)
+proc classEnd(p: []U8; i: INT; c: U8): (INT, BOOL);
+var j: INT; neg, first, hit: BOOL;
+begin
+    j := i + 1;
+    if (j < LEN(p)) and ((p[j] = '!') or (p[j] = '^')) then
+        neg := true;
+        INC(j);
+    end;
+    first := true;
+    while (j < LEN(p)) and ((p[j] # ']') or first) do
+        first := false;
+        if (j + 2 < LEN(p)) and (p[j + 1] = '-') and (p[j + 2] # ']') then
+            if (c >= p[j]) and (c <= p[j + 2]) then hit := true; end;
+            j := j + 3;
+        else
+            if c = p[j] then hit := true; end;
+            INC(j);
+        end;
+    end;
+    if j >= LEN(p) then return i + 1, c = '['; end;    (* no ]: [ is itself *)
+    return j + 1, hit # neg;
+end;
+
+(* Does the pattern p match all of s? *)
+proc matches*(p, s: []U8): BOOL;
+var pi, si, star, from, k: INT; hit: BOOL;
+begin
+    star := -1;
+    while si < LEN(s) do
+        if pi < LEN(p) then
+            match p[pi] of
+            | '*':
+                star := pi;
+                from := si;
+                INC(pi);
+                continue;
+            | '?':
+                INC(pi);
+                INC(si);
+                continue;
+            | '[':
+                k, hit := classEnd(p, pi, s[si]);
+                if hit then
+                    pi := k;
+                    INC(si);
+                    continue;
+                end;
+            | '\\':
+                if (pi + 1 < LEN(p)) and (p[pi + 1] = s[si]) then
+                    pi := pi + 2;
+                    INC(si);
+                    continue;
+                end;
+            | else:
+                if p[pi] = s[si] then
+                    INC(pi);
+                    INC(si);
+                    continue;
+                end;
+            end;
+        end;
+        if star < 0 then return false; end;
+        pi := star + 1;    (* the last * takes one byte more *)
+        INC(from);
+        si := from;
+    end;
+    while (pi < LEN(p)) and (p[pi] = '*') do INC(pi); end;
+    return pi = LEN(p);
+end;
+
+(* Does p hold a *, ? or [ not escaped? *)
+proc hasMeta*(p: []U8): BOOL;
+var i: INT;
+begin
+    i := 0;
+    while i < LEN(p) do
+        if p[i] = '\\' then
+            INC(i);
+        elsif (p[i] = '*') or (p[i] = '?') or (p[i] = '[') then
+            return true;
+        end;
+        INC(i);
+    end;
+    return false;
+end;
+
+(* p added to b without its escapes. *)
+proc addUnescaped(b: ^Buf.Buf; p: []U8);
+var i: INT;
+begin
+    i := 0;
+    while i < LEN(p) do
+        if (p[i] = '\\') and (i + 1 < LEN(p)) then INC(i); end;
+        Buf.add(b, p[i]);
+        INC(i);
+    end;
+end;
+
+(* What path names, following links. *)
+proc pathKind*(path: []U8): Kind;
+var f: Sys.Info; err: INT;
+begin
+    f, err := Sys.info(path);
+    if err # 0 then return none; end;
+    if f.dir then return dir; end;
+    return file;
+end;
+
+(* A copy of b's bytes, in the arena: a new path to grow, b kept. *)
+proc copyOf(b: ^Buf.Buf): Buf.Buf;
+var c: Buf.Buf;
+begin
+    Buf.init(ADR(c), Ccore.temps);
+    Buf.str(ADR(c), Buf.bytes(b));
+    return c;
+end;
+
+(* The paths under pre, which ends in / or is empty, that match the
+   rest of a pattern, p, added to out. *)
+proc globIn(pre: ^Buf.Buf; p: []U8; out: ^Vals.Vec);
+var b: Buf.Buf; d: Sys.Dir; from, nm: []U8; i, r: INT; slash, ok: BOOL;
+begin
+    i := 0;
+    while (i < LEN(p)) and (p[i] # '/') do INC(i); end;
+    slash := i < LEN(p);
+    r := i;
+    while (r < LEN(p)) and (p[r] = '/') do INC(r); end;
+    if not hasMeta(p[0..i]) then
+        b := copyOf(pre);
+        addUnescaped(ADR(b), p[0..i]);
+        if slash then Buf.add(ADR(b), '/'); end;
+        if r < LEN(p) then
+            globIn(ADR(b), p[r..LEN(p)], out);
+        elsif pathKind(Buf.bytes(ADR(b))) # none then
+            Vals.push(out, Ccore.bufVal(ADR(b)));
+        end;
+        return;
+    end;
+    from := Buf.bytes(pre);
+    if LEN(from) = 0 then from := "."; end;
+    if Sys.openDir(ADR(d), from) # 0 then return; end;
+    nm, ok := Sys.nextEntry(ADR(d));
+    while ok do
+        if ((nm[0] # '.') or (p[0] = '.')) and matches(p[0..i], nm) then
+            b := copyOf(pre);
+            Buf.str(ADR(b), nm);
+            if not slash then
+                Vals.push(out, Ccore.bufVal(ADR(b)));
+            elsif pathKind(Buf.bytes(ADR(b))) = dir then
+                Buf.add(ADR(b), '/');
+                if r < LEN(p) then globIn(ADR(b), p[r..LEN(p)], out); else Vals.push(out, Ccore.bufVal(ADR(b))); end;
+            end;
+        end;
+        nm, ok := Sys.nextEntry(ADR(d));
+    end;
+    Sys.closeDir(ADR(d));
+end;
+
+(* The paths that match the pattern pat, sorted, added to out: how many. *)
+proc glob*(pat: []U8; out: ^Vals.Vec): INT;
+var pre: Buf.Buf; a: []Ccore.Val; t: Ccore.Val; start, i, j: INT;
+begin
+    start := out^.len;
+    Buf.init(ADR(pre), Ccore.temps);
+    if (LEN(pat) > 0) and (pat[0] = '/') then
+        Buf.add(ADR(pre), '/');
+        while (LEN(pat) > 0) and (pat[0] = '/') do pat := pat[1..LEN(pat)]; end;
+    end;
+    if LEN(pat) > 0 then globIn(ADR(pre), pat, out); end;
+    a := Vals.all(out);
+    for i := start + 1 to LEN(a) - 1 do    (* insertion sort *)
+        t := a[i];
+        j := i - 1;
+        while (j >= start) and (Str.cmp(Ccore.bytes(a[j]), Ccore.bytes(t)) > 0) do
+            a[j + 1] := a[j];
+            DEC(j);
+        end;
+        a[j + 1] := t;
+    end;
+    return LEN(a) - start;
+end;
+
+end Cglob.

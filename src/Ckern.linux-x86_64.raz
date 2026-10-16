@@ -1,0 +1,22 @@
+(* Ckern: the system call a shell needs and Sys hasn't as it needs it.
+
+   Sys.exec puts every signal back to what it does at first before it
+   runs the program, ignored ones too, and looks for the program along
+   this process's PATH. A shell runs a program with the signals it
+   ignores still ignored, as trap '' and a script's background jobs
+   want, and looks for it along its own PATH variable. execve does
+   both: the kernel gives a signal that is handled what it does at
+   first, and leaves one that is ignored ignored. See RAZ-NOTES.md.
+
+   Depends on nothing. Left out: everything else, which Sys has. *)
+module Ckern;
+
+(* The program at path run in this one's place, with the arguments
+   argv and the environment envp, each a C string, the arrays ended by
+   nil. Returns only if it can't: minus an errno. *)
+proc execve*(path: ^U8; argv, envp: ^^U8): INT;
+begin
+    return SYSCALL(59, path, argv, envp);
+end;
+
+end Ckern.

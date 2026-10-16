@@ -1,4 +1,4 @@
-(* Cinterp: the tree-walking evaluator.
+(* Cinterp: the tree-walking evaluator, and process control.
 
    Every statement marks the arena as it starts and releases it as it
    ends, so the temporaries an expression makes die with the statement
@@ -8,19 +8,130 @@
    not errors, and travel as a flag, ctl, which each list of statements
    and each loop looks at.
 
-   Depends on Ccore for values and errors, on Csyntax for the tree, and
-   on Cvars for the variables and procedures. Commands, words and
-   captures come in step 6b of the port, the builtins in 6c; until then
-   each answers that it is missing. *)
+   A command's words are expanded, then it runs: a procedure or a
+   builtin in the shell, with its redirections made and undone around
+   it; anything else in a child, which joins the job's process group
+   under job control. A signal the shell takes is only noted when it
+   comes (Sys.handle), and seen where the shell looks for it: before
+   each statement, and wherever a system call it interrupts gave up.
+
+   Depends on Ccore for values and errors, on Csyntax for the tree, on
+   Cvars for the variables and procedures, on Cglob for patterns, and
+   on Ckern for execve. The builtins come in step 6c of the port, the
+   suggestions for a command not found in 6d; until then a builtin
+   answers that it is missing, and nothing is suggested. *)
 module Cinterp;
-import Fmt, Buf, Str, Ccore, Csyntax, Cvars, Vals := Vec(Ccore.Val);
+import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Ckern, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
+
+const
+    MaxSaves = 256;    (* fds saved around a builtin's redirections *)
+    MaxSubs = 64;    (* <(...)s open at once *)
+    HereMax = 32768;    (* a here string the shell writes itself; a longer one, a child *)
+
+    (* The signals trap takes: EXIT, which isn't one, and the rest *)
+    TrapSigs: []INT = [0, Sys.sigHup, Sys.sigInt, Sys.sigQuit, Sys.sigTerm, Sys.sigUsr1, Sys.sigUsr2];
+    NTrap = LEN(TrapSigs);
 
 type
     Ctl* = (cNone, cBreak, cCont, cExit);
 
+    (* What trap set for a signal *)
+    Act = (aDefault, aIgnore, aProc);
+    Trap = record
+        act: Act;
+        name: []U8;    (* aProc's procedure, from the heap *)
+        pend: BOOL;    (* come, its procedure not yet run *)
+    end;
+
+    (* What a signal of the trap table does to the shell *)
+    Disp = (
+        dDefault,    (* what it does at first *)
+        dIgnore,
+        dInt,    (* SIGINT: stops what runs *)
+        dHup,    (* SIGHUP: passed on to the jobs, then the end *)
+        dTrap,    (* its trap's procedure runs *)
+        dPassOn    (* in a background list: passed on to the list's group *)
+    );
+
+    (* How a process ended *)
+    Ended = record
+        how: Sys.Status;
+        n: INT;    (* exited: its status; killed or stopped: the signal *)
+    end;
+
+    (* A job: one process group, its processes in pipeline order *)
+    Job = record
+        id: INT;    (* the number shown as [id] *)
+        pgid: INT;
+        pids: []INT;    (* from the heap, as are ends and name *)
+        ends: []Ended;    (* once reaped *)
+        left: INT;    (* processes not yet reaped *)
+        stopped: BOOL;
+        hasTio: BOOL;    (* tio holds its terminal, saved as it stopped *)
+        tio: Sys.Mode;
+        name: []U8;
+    end;
+
+    (* A redirection with its word expanded *)
+    Rx = record
+        kind: Csyntax.RedirKind;
+        fd, fd2: INT;
+        s: []U8;    (* the file, or a here string's text *)
+    end;
+
+    (* A command's words and redirections, expanded *)
+    Stage = record
+        args: Vals.Vec;
+        rx: []Rx;
+    end;
+
+    Save = record
+        fd, saved: INT;    (* saved -1: fd was closed *)
+    end;
+
+    (* A <(...): the read end the command is given, and the list's
+       process, 0 once it is reaped or left to its stopped job *)
+    Sub = record
+        fd, pid, pg: INT;
+    end;
+
 var
     ctl*: Ctl;    (* a break, continue or exit on its way out *)
+    intr*: BOOL;    (* SIGINT came, and stops what runs *)
+    interactive: BOOL;
     curFunc: ^Csyntax.Stmt;    (* the procedure running, nil outside any *)
+
+    traps: [NTrap]Trap;
+    disps: [NTrap]Disp;
+    trapPending: BOOL;
+
+    saves: [MaxSaves]Save;
+    nsave: INT;
+    subs: [MaxSubs]Sub;
+    nsub: INT;
+    (* The command being expanded, for its <(...)s: under job control
+       they lead or join its job's group, subPg, if it forks. runPipe
+       sets them. *)
+    subPg: INT;
+    subSt: ^Stage;    (* a single command's words so far *)
+    subAll: BOOL;    (* a pipeline: every stage forks *)
+
+    jobs: Jobs.Vec;    (* not yet reaped, oldest first; the last is current *)
+    jc: BOOL;    (* job control: the shell owns the terminal *)
+    jobChild: BOOL;    (* forked into a job's process group *)
+    shellPg, origPg: INT;    (* the shell's group, and the one to give back *)
+    shellTio: Sys.Mode;    (* the terminal as the shell likes it *)
+
+    tailOk: BOOL;    (* the next command may exec over this process *)
+    intSeen: BOOL;    (* waitFor let a Ctrl-C pass *)
+    keepFds: BOOL;    (* exec with no command: its redirections stay *)
+    exempt: INT;    (* above 0, a failure doesn't trigger errexit *)
+    chainSkipped: BOOL;    (* the last pipeline of the chain didn't run *)
+
+proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
+proc execList(l: []^Csyntax.Stmt): ERROR; forward;
+proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
+proc runArgs(a: []Ccore.Val): (INT, ERROR); forward;
 
 (* ---------------------------------------------- not yet ported *)
 
@@ -29,30 +140,916 @@ begin
     return Ccore.fail(Ccore.text("{} come with a later step of the port", [Fmt.str(what)]));
 end;
 
-proc runAndOr(_s: ^Csyntax.Stmt): (INT, ERROR);
-begin
-    return 0, missing("commands");
-end;
-
-proc interpolate(_parts: []Csyntax.Part): (Ccore.Val, ERROR);
-begin
-    return {}, missing("interpolated strings");
-end;
-
-proc capture(_list: []^Csyntax.Stmt): (Ccore.Val, ERROR);
-begin
-    return {}, missing("captures");
-end;
-
 proc builtin(_e: ^Csyntax.Expr): (Ccore.Val, ERROR);
 begin
     return {}, missing("builtins");
 end;
 
-(* ------------------------------------------------------- procedures *)
+proc runCmdBuiltin(_bi: INT; _a: []Ccore.Val): (INT, ERROR);
+begin
+    return 0, missing("builtins");
+end;
 
-proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
-proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
+proc suggestCommand(_name: []U8): []U8;
+begin
+    return "";
+end;
+
+proc correct(_a: []Ccore.Val);
+begin
+end;
+
+(* ---------------------------------------------------------- signals *)
+
+(* What the shell's default is for trap entry i. *)
+proc shellDefault(i: INT): Disp;
+begin
+    if TrapSigs[i] = Sys.sigInt then return dInt; end;
+    if TrapSigs[i] = Sys.sigHup then return dHup; end;
+    if (TrapSigs[i] = Sys.sigQuit) and interactive then return dIgnore; end;
+    return dDefault;
+end;
+
+(* Trap entry i's signal made to do d. *)
+proc setSig(i: INT; d: Disp);
+begin
+    disps[i] := d;
+    match d of
+    | dDefault: _ := Sys.ignore(TrapSigs[i], false);
+    | dIgnore: _ := Sys.ignore(TrapSigs[i], true);
+    | else: _ := Sys.handle(TrapSigs[i]);
+    end;
+end;
+
+(* What trap entry i asks for, made so; its default is the shell's own. *)
+proc applySig(i: INT);
+begin
+    match traps[i].act of
+    | aProc: setSig(i, dTrap);
+    | aIgnore: setSig(i, dIgnore);
+    | aDefault: setSig(i, shellDefault(i));
+    end;
+end;
+
+(* The terminal has gone: the hangup passed on to every job, the
+   stopped ones woken to take it, then the shell's end by it. *)
+proc hangUp;
+var a: []Job; i: INT;
+begin
+    a := Jobs.all(ADR(jobs));
+    for i := 0 to LEN(a) - 1 do
+        _ := Sys.kill(-a[i].pgid, Sys.sigHup);
+        if a[i].stopped then _ := Sys.kill(-a[i].pgid, Sys.sigCont); end;
+    end;
+    _ := Sys.ignore(Sys.sigHup, false);
+    _ := Sys.kill(Sys.pid(), Sys.sigHup);
+end;
+
+(* The signals that came since the last look, each doing what it
+   does to the shell; the REPL looks too, when a line ends. *)
+proc noteSignals*;
+var i, sig: INT;
+begin
+    for i := 1 to NTrap - 1 do
+        sig := TrapSigs[i];
+        if (disps[i] >= dInt) and Sys.came(sig) then
+            match disps[i] of
+            | dInt: intr := true;
+            | dHup: hangUp;
+            | dTrap:
+                traps[i].pend := true;
+                trapPending := true;
+            | dPassOn:
+                (* in a background list: meant for the whole list, so
+                   passed on to its group, this shell included, which
+                   then dies of it *)
+                _ := Sys.ignore(sig, false);
+                _ := Sys.kill(0, sig);
+            | else:
+            end;
+        end;
+    end;
+end;
+
+(* The signals as the shell takes them, and for an interactive one the
+   job control stops ignored. *)
+proc onSignals*;
+var i: INT;
+begin
+    for i := 1 to NTrap - 1 do applySig(i); end;
+    if interactive then
+        _ := Sys.ignore(Sys.sigTstp, true);
+        _ := Sys.ignore(Sys.sigTtin, true);
+        _ := Sys.ignore(Sys.sigTtou, true);
+    end;
+end;
+
+proc giveTerm(pg: INT);
+begin
+    _ := Sys.foreground(0, pg);
+end;
+
+(* The interactive shell takes the terminal: it waits to be in the
+   foreground, then leads a process group of its own. *)
+proc jobControl*;
+var pg: INT;
+begin
+    _ := Sys.ignore(Sys.sigTtin, false);
+    while true do
+        pg := Sys.foregroundOf(0);
+        if pg < 0 then return; end;
+        if pg = Sys.group() then break; end;
+        _ := Sys.kill(0, Sys.sigTtin);
+    end;
+    _ := Sys.ignore(Sys.sigTtin, true);
+    origPg := pg;
+    _ := Sys.setGroup(0, 0);
+    shellPg := Sys.group();
+    giveTerm(shellPg);
+    shellTio, _ := Sys.getMode(0);
+    jc := true;
+end;
+
+(* The signals of a program about to be run: those ignored stay
+   ignored, the rest go back to what they do at first. *)
+proc execSignals;
+var i: INT;
+begin
+    for i := 1 to NTrap - 1 do
+        if traps[i].act = aIgnore then setSig(i, dIgnore); else setSig(i, dDefault); end;
+    end;
+    _ := Sys.ignore(Sys.sigTstp, false);
+    _ := Sys.ignore(Sys.sigTtin, false);
+    _ := Sys.ignore(Sys.sigTtou, false);
+end;
+
+(* In a forked child, which doesn't run the shell's trap procedures. *)
+proc childSignals;
+var i: INT;
+begin
+    Ccore.opts^.inChild := true;
+    for i := 0 to NTrap - 1 do
+        if traps[i].act = aProc then traps[i].act := aDefault; end;
+        traps[i].pend := false;
+    end;
+    trapPending := false;
+    jc := false;
+    execSignals;
+end;
+
+(* A new process put in the group pg, 0 a group of its own, and given
+   the terminal in the foreground. Both sides of the fork do this, for
+   either may run first. *)
+proc joinGroup(pid, pg: INT; fg: BOOL);
+begin
+    if not jc then return; end;
+    if pg = 0 then pg := pid; end;
+    _ := Sys.setGroup(pid, pg);
+    if fg then giveTerm(pg); end;
+end;
+
+(* The child's side: the job joined, then the signals reset. *)
+proc childJob(pg: INT; fg: BOOL);
+begin
+    if jc then
+        joinGroup(Sys.pid(), pg, fg);
+        jobChild := true;
+    end;
+    childSignals;
+end;
+
+(* After SIGINT: status 130 and Stopped, or in a child its end. *)
+proc interrupted: ERROR;
+begin
+    intr := false;
+    if Ccore.opts^.inChild then Sys.exit(130); end;
+    Cvars.setStatus(130);
+    Ccore.put(2, "\n");
+    return Ccore.Stopped;
+end;
+
+(* ------------------------------------------------------ descriptors *)
+
+proc saveFd(fd: INT): ERROR;
+begin
+    if nsave >= MaxSaves then return Ccore.fail("too many redirections"); end;
+    saves[nsave] := {fd: fd, saved: Sys.dupAbove(fd, 10)};
+    INC(nsave);
+    return nil;
+end;
+
+(* The fds saved above lvl put back. *)
+proc restoreFds(lvl: INT);
+begin
+    while nsave > lvl do
+        DEC(nsave);
+        if saves[nsave].saved >= 0 then
+            _ := Sys.dupTo(saves[nsave].saved, saves[nsave].fd);
+            Sys.close(saves[nsave].saved);
+        else
+            Sys.close(saves[nsave].fd);
+        end;
+    end;
+end;
+
+(* The redirections above lvl made for good: the copies forgotten. *)
+proc commitFds(lvl: INT);
+begin
+    while nsave > lvl do
+        DEC(nsave);
+        if saves[nsave].saved >= 0 then Sys.close(saves[nsave].saved); end;
+    end;
+end;
+
+(* src moved to dst, dst saved first if save. *)
+proc place(src, dst: INT; save: BOOL): ERROR;
+begin
+    if src = dst then return nil; end;
+    if save then try saveFd(dst); end;
+    _ := Sys.dupTo(src, dst);
+    Sys.close(src);
+    return nil;
+end;
+
+(* A pipe with s to read from it; a child writes a long one. *)
+proc hereFd(s: []U8): (INT, ERROR);
+var r, w: INT;
+begin
+    r, w := Sys.pipe();
+    if r < 0 then return 0, Ccore.fail("cannot make pipe"); end;
+    if LEN(s) <= HereMax then
+        Ccore.put(w, s);
+    elsif Sys.fork() = 0 then
+        Sys.close(r);
+        Ccore.put(w, s);
+        Sys.exit(0);
+    end;
+    Sys.close(w);
+    return r, nil;
+end;
+
+(* The file of x, opened as how asks; -1, having said why, if it can't
+   be. *)
+proc openRedir(x: Rx; how: Sys.Accesses): INT;
+var fd: INT;
+begin
+    fd := Sys.openMode(x.s, how, Ccore.permAll);
+    if fd < 0 then Ccore.warnOn(x.s, Ccore.text("cannot open: {}", [Fmt.str(Ccore.errText(-fd))])); end;
+    return fd;
+end;
+
+(* The redirections rx made, each fd they change saved if save; false
+   if a file can't be opened, the caller to put back what was placed. *)
+proc redirect(rx: []Rx; save: BOOL): (BOOL, ERROR);
+var fd, i: INT;
+begin
+    for i := 0 to LEN(rx) - 1 do
+        match rx[i].kind of
+        | rIn, rOut, rApp:
+            match rx[i].kind of
+            | rIn: fd := openRedir(rx[i], {Sys.reading});
+            | rOut: fd := openRedir(rx[i], {Sys.writing, Sys.creating, Sys.truncating});
+            | else: fd := openRedir(rx[i], {Sys.writing, Sys.creating, Sys.appending});
+            end;
+            if fd < 0 then return false, nil; end;
+            try place(fd, rx[i].fd, save);
+        | rBoth:
+            fd := openRedir(rx[i], {Sys.writing, Sys.creating, Sys.truncating});
+            if fd < 0 then return false, nil; end;
+            try place(fd, 1, save);
+            if save then try saveFd(2); end;
+            _ := Sys.dupTo(1, 2);
+        | rDup:
+            if save then try saveFd(rx[i].fd); end;
+            _ := Sys.dupTo(rx[i].fd2, rx[i].fd);
+        | rHere:
+            fd := try hereFd(rx[i].s);
+            try place(fd, rx[i].fd, save);
+        end;
+    end;
+    return true, nil;
+end;
+
+(* -------------------------------------------------------- processes *)
+
+(* An end as a shell's status: the exit status, or 128 and the signal. *)
+proc exitCode(e: Ended): INT;
+begin
+    match e.how of
+    | exited: return e.n;
+    | killed: return 128 + e.n;
+    | else: return 1;
+    end;
+end;
+
+(* Waits for a child outside job control. One that stops is continued,
+   since nobody could resume it; but in a job, the job stops with it. *)
+proc waitFor(pid: INT): INT;
+var e: Ended; r: INT;
+begin
+    while true do
+        r, e.how, e.n := Sys.wait(pid, true);
+        if r < 0 then
+            if r # -Ccore.errIntr then return 127; end;
+            noteSignals;
+        elsif e.how = Sys.stopped then
+            if jobChild then
+                _ := Sys.kill(Sys.pid(), Sys.sigStop);
+            else
+                Ccore.errHead;
+                Ccore.put(2, "stopped; no job control here, continuing\n");
+                _ := Sys.kill(pid, Sys.sigCont);
+            end;
+        else
+            break;
+        end;
+    end;
+    (* wait and see, as bash does: a Ctrl-C the child caught and lived
+       through was the child's business, so it stops no loop here *)
+    noteSignals;
+    if intr then
+        intSeen := true;
+        intr := (e.how = Sys.killed) and (e.n = Sys.sigInt);
+    end;
+    return exitCode(e);
+end;
+
+(* ------------------------------------------------------------- jobs *)
+
+(* The table is kept in age order, and a job that stops moves to the
+   end: the last is the current job. Jobs move, so an index is good
+   only until the table next changes. *)
+
+(* A new job of the processes pids, in the group pg: its index. *)
+proc newJob(pids: []INT; pg: INT; name: []U8): INT;
+var j: ^Job; a: []Job; p: ^INT; e: ^Ended; i, id: INT; ok: BOOL;
+begin
+    a := Jobs.all(ADR(jobs));
+    id := 1;    (* the least number not in use *)
+    i := 0;
+    while i < LEN(a) do
+        if a[i].id = id then
+            INC(id);
+            i := 0;
+        else
+            INC(i);
+        end;
+    end;
+    j := Jobs.add(ADR(jobs));
+    j^ := {id: id, pgid: pg, left: LEN(pids)};
+    p := ^INT(Mem.alloc(Heap.heap, LEN(pids) * SIZE(INT), 8));
+    e := ^Ended(Mem.alloc(Heap.heap, LEN(pids) * SIZE(Ended), 8));
+    if (p = nil) or (e = nil) then Rt.stop("concha: out of memory\n"); end;
+    j^.pids := p[0..LEN(pids)];
+    j^.ends := e[0..LEN(pids)];
+    COPY(j^.pids, pids);
+    for i := 0 to LEN(pids) - 1 do j^.ends[i] := {how: Sys.exited, n: 127}; end;
+    j^.name, ok := Str.copy(Heap.heap, name);
+    if not ok then Rt.stop("concha: out of memory\n"); end;
+    return jobs.len - 1;
+end;
+
+proc stoppedJobs*: BOOL;
+var a: []Job; k: INT;
+begin
+    a := Jobs.all(ADR(jobs));
+    for k := 0 to LEN(a) - 1 do
+        if a[k].stopped then return true; end;
+    end;
+    return false;
+end;
+
+proc dropJob(k: INT);
+var a: []Job;
+begin
+    a := Jobs.all(ADR(jobs));
+    Mem.free(Heap.heap, ^U8(ADR(a[k].pids[0])));
+    Mem.free(Heap.heap, ^U8(ADR(a[k].ends[0])));
+    Str.free(Heap.heap, a[k].name);
+    COPY(a[k..LEN(a) - 1], a[k + 1..LEN(a)]);
+    Jobs.resize(ADR(jobs), LEN(a) - 1);
+end;
+
+(* Job k moved to the end, made current: its new index. *)
+proc makeCurrent(k: INT): INT;
+var a: []Job; j: Job;
+begin
+    a := Jobs.all(ADR(jobs));
+    j := a[k];
+    COPY(a[k..LEN(a) - 1], a[k + 1..LEN(a)]);
+    a[LEN(a) - 1] := j;
+    return LEN(a) - 1;
+end;
+
+(* The end of pid noted: the job it was of, or -1. *)
+proc reaped(pid: INT; e: Ended): INT;
+var a: []Job; k, i: INT;
+begin
+    a := Jobs.all(ADR(jobs));
+    for k := 0 to LEN(a) - 1 do
+        for i := 0 to LEN(a[k].pids) - 1 do
+            if a[k].pids[i] = pid then
+                a[k].ends[i] := e;
+                DEC(a[k].left);
+                return k;
+            end;
+        end;
+    end;
+    return -1;
+end;
+
+proc findJob(pid: INT): INT;
+var a: []Job; k, i: INT;
+begin
+    a := Jobs.all(ADR(jobs));
+    for k := 0 to LEN(a) - 1 do
+        for i := 0 to LEN(a[k].pids) - 1 do
+            if a[k].pids[i] = pid then return k; end;
+        end;
+    end;
+    return -1;
+end;
+
+(* "[id] what name" of job k, on standard error. *)
+proc report(k: INT; what: []U8);
+var j: ^Job; b: Buf.Buf; m: Ccore.Mark;
+begin
+    j := ADR(Jobs.all(ADR(jobs))[k]);
+    m := Ccore.mark();
+    Buf.init(ADR(b), Ccore.temps);
+    Fmt.write(ADR(b), "[{}] {} {}\n", [Fmt.int(j^.id), Fmt.str(what), Fmt.str(j^.name)]);
+    Ccore.put(2, Buf.bytes(ADR(b)));
+    Ccore.release(m);
+end;
+
+(* A finished job's status: its last process's, or with pipefail its
+   last failing one's. *)
+proc jobStatus(k: INT): INT;
+var j: ^Job; i, st, r: INT; pf: BOOL;
+begin
+    j := ADR(Jobs.all(ADR(jobs))[k]);
+    pf := Cvars.flag("pipefail");
+    for i := 0 to LEN(j^.ends) - 1 do
+        st := exitCode(j^.ends[i]);
+        if not pf or (st # 0) then r := st; end;
+    end;
+    return r;
+end;
+
+(* Waits for the foreground job k to finish or stop, then takes the
+   terminal back. A job that stops stays in the table, and the shell
+   goes back to the prompt with status 148 and Stopped. *)
+proc waitJob(k: INT): (INT, ERROR);
+var j: ^Job; e, last: Ended; m: Sys.Mode; r, i, st: INT;
+begin
+    j := ADR(Jobs.all(ADR(jobs))[k]);
+    while j^.left > 0 do
+        r, e.how, e.n := Sys.wait(-j^.pgid, true);
+        if r < 0 then
+            if r # -Ccore.errIntr then break; end;
+            noteSignals;
+        elsif e.how = Sys.stopped then
+            j^.stopped := true;
+            break;
+        else
+            _ := reaped(r, e);
+        end;
+    end;
+    giveTerm(shellPg);
+    if j^.stopped then
+        (* its <(...)s stopped with it: fg continues them, and closeSubs
+           only closes their pipes *)
+        for i := 0 to nsub - 1 do
+            if subs[i].pg = j^.pgid then subs[i].pid := 0; end;
+        end;
+        j^.tio, r := Sys.getMode(0);
+        j^.hasTio := r = 0;
+        _ := Sys.setMode(0, shellTio);
+        k := makeCurrent(k);
+        Ccore.put(2, "\n");
+        report(k, "stopped");
+        Cvars.setStatus(148);
+        return 0, Ccore.Stopped;
+    end;
+    (* a program killed by a signal may leave the terminal in a mess; one
+       that exits may have set it up with stty on purpose *)
+    last := j^.ends[LEN(j^.ends) - 1];
+    if last.how = Sys.killed then
+        _ := Sys.setMode(0, shellTio);
+    else
+        m, r := Sys.getMode(0);
+        if r = 0 then shellTio := m; end;
+    end;
+    (* the terminal sent Ctrl-C to the job, not to the shell *)
+    if (last.how = Sys.killed) and (last.n = Sys.sigInt) then intr := true; end;
+    st := jobStatus(k);
+    dropJob(k);
+    return st, nil;
+end;
+
+(* Waits for the foreground job of the processes pids, in the group pg.
+   When a <(...) leads the group, it may have read the terminal before
+   the group had it, and stopped: it is continued. *)
+proc foreground(pids: []INT; pg: INT; name: []U8): (INT, ERROR);
+begin
+    if pg # pids[0] then _ := Sys.kill(-pg, Sys.sigCont); end;
+    return waitJob(newJob(pids, pg, name));
+end;
+
+(* A job's name: its words. *)
+proc argsName(a: []Ccore.Val; b: ^Buf.Buf);
+var i: INT;
+begin
+    if LEN(a) = 0 then Buf.str(b, "..."); end;
+    for i := 0 to LEN(a) - 1 do
+        if i > 0 then Buf.add(b, ' '); end;
+        Buf.str(b, Ccore.bytes(Ccore.toStr(a[i])));
+    end;
+end;
+
+(* Waits for a single command in the foreground, in the group pg, 0 its
+   own. *)
+proc waitFg(pid, pg: INT; a: []Ccore.Val): (INT, ERROR);
+var b: Buf.Buf; pids: [1]INT;
+begin
+    if not jc then return waitFor(pid), nil; end;
+    if pg = 0 then pg := pid; end;
+    joinGroup(pid, pg, true);
+    Buf.init(ADR(b), Ccore.temps);
+    argsName(a, ADR(b));
+    pids[0] := pid;
+    return foreground(pids, pg, Buf.bytes(ADR(b)));
+end;
+
+proc fork: (INT, ERROR);
+var pid: INT;
+begin
+    pid := Sys.fork();
+    if pid < 0 then return 0, Ccore.fail("cannot fork"); end;
+    return pid, nil;
+end;
+
+(* s as a C string, in the arena. *)
+proc cstr(s: []U8): ^U8;
+var p: ^U8;
+begin
+    p := Ccore.alloc(LEN(s) + 1);
+    COPY(p[0..LEN(s)], s);
+    p[LEN(s)] := 0;
+    return p;
+end;
+
+(* The strings a as a C array, ended by nil, in the arena. *)
+proc cstrs(a: [][]U8): ^^U8;
+var p: ^^U8; i: INT;
+begin
+    p := ^^U8(Ccore.alloc((LEN(a) + 1) * SIZE(^U8)));
+    for i := 0 to LEN(a) - 1 do p[i] := cstr(a[i]); end;
+    p[LEN(a)] := nil;
+    return p;
+end;
+
+(* The environment of a program the shell runs: its exported globals. *)
+proc buildEnv: ^^U8;
+var env: Names.Vec; g: []Cvars.Var; b: Buf.Buf; i: INT;
+begin
+    Names.init(ADR(env), Ccore.temps);
+    g := Cvars.allGlobals();
+    for i := 0 to LEN(g) - 1 do
+        if g[i].exported then
+            Buf.init(ADR(b), Ccore.temps);
+            Buf.str(ADR(b), g[i].name);
+            Buf.add(ADR(b), '=');
+            Buf.str(ADR(b), Ccore.bytes(Ccore.toStr(g[i].v)));
+            Names.push(ADR(env), Buf.bytes(ADR(b)));
+        end;
+    end;
+    return cstrs(Names.all(ADR(env)));
+end;
+
+(* For tryExec: the file f run with the arguments av, n of them after
+   its name, and the environment ev; a file the kernel can't run
+   (ENOEXEC) is a script for /bin/sh. err is why it failed, unless f
+   wasn't there. *)
+proc attempt(f: []U8; av, ev: ^^U8; n: INT; err: ^INT);
+var sh: ^^U8; e, k: INT;
+begin
+    e := -Ckern.execve(cstr(f), av, ev);
+    if e = Ccore.errNoExec then
+        sh := ^^U8(Ccore.alloc((n + 3) * SIZE(^U8)));
+        sh[0] := cstr("/bin/sh");
+        sh[1] := cstr(f);
+        for k := 1 to n + 1 do sh[k + 1] := av[k]; end;    (* the nil too *)
+        _ := Ckern.execve(sh[0], sh, ev);
+    end;
+    if e # Ccore.errNoEnt then err^ := e; end;
+end;
+
+(* Is c a byte of a variable's name? *)
+proc nameByte(c: U8): BOOL;
+begin
+    return (c >= 'a') and (c <= 'z') or (c >= 'A') and (c <= 'Z') or (c >= '0') and (c <= '9') or (c = '_');
+end;
+
+(* The program args name run in this process's place, looked for along
+   PATH; if it can't be, why not said, and 126 or 127. *)
+proc tryExec(args: []Ccore.Val): INT;
+var words: Names.Vec; av, ev: ^^U8; name, path, dir: []U8; i, err: INT; b: Buf.Buf; slash, more: BOOL;
+begin
+    Names.init(ADR(words), Ccore.temps);
+    for i := 0 to LEN(args) - 1 do Names.push(ADR(words), Ccore.bytes(Ccore.toStr(args[i]))); end;
+    av := cstrs(Names.all(ADR(words)));
+    ev := buildEnv();
+    name := Names.all(ADR(words))[0];
+    slash := Str.find(name, "/") >= 0;
+    err := Ccore.errNoEnt;
+    if slash then
+        attempt(name, av, ev, LEN(args) - 1, ADR(err));
+    elsif LEN(name) > 0 then
+        path := Cvars.searchPath();
+        more := true;
+        while more do
+            dir, path, more := Str.cut(path, ":");
+            Buf.init(ADR(b), Ccore.temps);
+            if LEN(dir) = 0 then dir := "."; end;
+            Buf.str(ADR(b), dir);
+            Buf.add(ADR(b), '/');
+            Buf.str(ADR(b), name);
+            attempt(Buf.bytes(ADR(b)), av, ev, LEN(args) - 1, ADR(err));
+        end;
+    end;
+    Ccore.errHead;
+    Ccore.put(2, name);
+    if err = Ccore.errNoEnt then
+        Ccore.put(2, ": not found");
+        (* sh's FOO=bar cmd *)
+        i := 0;
+        while (i < LEN(name)) and nameByte(name[i]) do INC(i); end;
+        if (i > 0) and (i < LEN(name)) and (name[i] = '=') and ((name[0] < '0') or (name[0] > '9')) then
+            Ccore.put(2, Ccore.text("; to set it, {} := ...; for one command, env {} command\n", [Fmt.str(name[0..i]), Fmt.str(name)]));
+            return 127;
+        end;
+        if interactive and not slash then
+            path := suggestCommand(name);
+            if LEN(path) > 0 then Ccore.put(2, Ccore.text("; did you mean {}?", [Fmt.str(path)])); end;
+        end;
+        Ccore.put(2, "\n");
+        return 127;
+    end;
+    if err = Ccore.errAcces then Ccore.put(2, ": permission denied\n"); else Ccore.put(2, ": cannot execute\n"); end;
+    return 126;
+end;
+
+proc execExternal(args: []Ccore.Val);
+begin
+    Sys.exit(tryExec(args));
+end;
+
+(* Is the list l a lone command, not in the background, which a child
+   may exec over itself? *)
+proc lone(l: []^Csyntax.Stmt): BOOL;
+begin
+    return (LEN(l) = 1) and (l[0]^.kind = Csyntax.sCmd) and (LEN(l[0]^.pipes) = 1) and not l[0]^.bg;
+end;
+
+(* In a child, standard output made w, and the list l run, the end of
+   the child. *)
+proc runInto(l: []^Csyntax.Stmt; w: INT);
+begin
+    _ := Sys.dupTo(w, 1);
+    Sys.close(w);
+    INC(exempt);    (* errexit passes captures by *)
+    tailOk := lone(l);
+    _ := execList(l);
+    Sys.exit(Cvars.status());
+end;
+
+(* `list`: what the list writes, without the line feeds it ends in. *)
+proc capture(l: []^Csyntax.Stmt): (Ccore.Val, ERROR);
+var b: Buf.Buf; s: []U8; r, w, pid, k: INT;
+begin
+    r, w := Sys.pipe();
+    if r < 0 then return {}, Ccore.fail("cannot make pipe"); end;
+    pid := try fork();
+    if pid = 0 then
+        childSignals;
+        Sys.close(r);
+        runInto(l, w);
+    end;
+    Sys.close(w);
+    Buf.init(ADR(b), Ccore.temps);
+    while true do
+        s := Buf.spare(ADR(b), 4096);
+        k := Sys.read(r, s);
+        if k > 0 then
+            INC(b.len, k);
+        elsif k = -Ccore.errIntr then
+            noteSignals;
+        else
+            break;
+        end;
+    end;
+    Sys.close(r);
+    Cvars.setStatus(waitFor(pid));
+    while (b.len > 0) and (Buf.bytes(ADR(b))[b.len - 1] = '\n') do DEC(b.len); end;
+    return Ccore.bufVal(ADR(b)), nil;
+end;
+
+(* The number of the command builtin called v, from 1; 0 if none is. *)
+proc cmdBuiltin(v: Ccore.Val): INT;
+var i: INT;
+begin
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+        if Ccore.bytes(v) = Csyntax.CmdBuiltins[i].name then return i + 1; end;
+    end;
+    return 0;
+end;
+
+(* Do the words a run outside the shell, neither procedure nor builtin? *)
+proc extWords(a: []Ccore.Val): BOOL;
+var nm: Ccore.Val;
+begin
+    if LEN(a) = 0 then return false; end;
+    nm := Ccore.toStr(a[0]);
+    return (Cvars.findProc(Ccore.bytes(nm)) = nil) and (cmdBuiltin(nm) = 0);
+end;
+
+(* Does the <(...) about to open belong to a job? Under job control a
+   pipeline is one, and a single command that runs outside the shell:
+   its name is expanded before any <(...) after it. A builtin or a
+   procedure keeps the terminal in the shell, and its lists with it. *)
+proc subJob: BOOL;
+begin
+    return jc and (subAll or (subSt # nil) and extWords(Vals.all(ADR(subSt^.args))));
+end;
+
+(* <(list): the list run with its output on a pipe, and the read end
+   named, /dev/fd/N. The end stays open, and passed on to what is run,
+   until the command that holds it is done (closeSubs). In a job, the
+   first list leads the job's group and the rest join it, so that what
+   the command runs joins it too, and all of them get the terminal. *)
+proc openSub(l: []^Csyntax.Stmt): (Ccore.Val, ERROR);
+var r, w, pid, i: INT; grp: BOOL;
+begin
+    if nsub >= MaxSubs then return {}, Ccore.fail("too many <(...)"); end;
+    r, w := Sys.pipe();
+    if r < 0 then return {}, Ccore.fail("cannot make pipe"); end;
+    grp := subJob();
+    pid := try fork();
+    if pid = 0 then
+        if grp then childJob(subPg, false); else childSignals; end;
+        for i := 0 to nsub - 1 do Sys.close(subs[i].fd); end;    (* not the list's to hold *)
+        nsub := 0;
+        Sys.close(r);
+        runInto(l, w);
+    end;
+    Sys.close(w);
+    _ := Sys.keepOnExec(r, true);
+    subs[nsub] := {fd: r, pid: pid};
+    if grp then
+        joinGroup(pid, subPg, false);
+        if subPg = 0 then subPg := pid; end;
+        subs[nsub].pg := subPg;
+    end;
+    INC(nsub);
+    return Ccore.strVal(Ccore.text("/dev/fd/{}", [Fmt.int(r)])), nil;
+end;
+
+(* The <(...)s opened above lvl closed, then their lists reaped, whose
+   status counts for nothing. Closing first lets a list still writing
+   die of SIGPIPE rather than wait. One that has stopped wants the
+   terminal its command has given back, and nobody will read what it
+   writes: it is ended. *)
+proc closeSubs(lvl: INT);
+var e: Ended; i, r: INT;
+begin
+    for i := lvl to nsub - 1 do Sys.close(subs[i].fd); end;
+    for i := lvl to nsub - 1 do
+        while subs[i].pid > 0 do
+            r, e.how, e.n := Sys.wait(subs[i].pid, true);
+            if r = -Ccore.errIntr then
+                noteSignals;
+            elsif (r > 0) and (e.how = Sys.stopped) then
+                _ := Sys.kill(subs[i].pid, Sys.sigTerm);
+                _ := Sys.kill(subs[i].pid, Sys.sigCont);
+            else
+                subs[i].pid := 0;
+            end;
+        end;
+    end;
+    nsub := lvl;
+end;
+
+(* ------------------------------------------------------------ words *)
+
+proc partVal(p: ^Csyntax.Part): (Ccore.Val, ERROR);
+var r: ^Cvars.Var; b: Buf.Buf; h: []U8; ok: BOOL;
+begin
+    match p^.kind of
+    | ptLit: return Ccore.strVal(p^.s), nil;
+    | ptVar:
+        r := Cvars.find(p^.s);
+        if r = nil then return {}, Cvars.undefined(p^.s); end;
+        return Ccore.temp(r^.v), nil;
+    | ptExpr: return eval(p^.e);
+    | ptCap: return capture(p^.cap);
+    | ptSub: return openSub(p^.cap);
+    | ptHome:
+        if LEN(p^.s) = 0 then return Ccore.strVal(Cvars.home()), nil; end;
+        h, ok := Cvars.userHome(p^.s);
+        if ok then return Ccore.strVal(h), nil; end;
+        Buf.init(ADR(b), Ccore.temps);    (* no such user *)
+        Buf.add(ADR(b), '~');
+        Buf.str(ADR(b), p^.s);
+        return Ccore.bufVal(ADR(b)), nil;
+    end;
+end;
+
+proc interpolate(parts: []Csyntax.Part): (Ccore.Val, ERROR);
+var b: Buf.Buf; i: INT;
+begin
+    Buf.init(ADR(b), Ccore.temps);
+    for i := 0 to LEN(parts) - 1 do Buf.str(ADR(b), Ccore.bytes(Ccore.toStr(try partVal(ADR(parts[i]))))); end;
+    return Ccore.bufVal(ADR(b)), nil;
+end;
+
+(* The word w expanded, its fields added to out: a lone $x, $(e),
+   `list` or <(list) unquoted gives a list's items each as a field;
+   anything else is one field, or the paths it matches as a pattern. *)
+proc expandWord(w: Csyntax.Word; out: ^Vals.Vec): ERROR;
+var v: Ccore.Val; plain, pat: Buf.Buf; s: []U8; i, k: INT; wild: BOOL;
+begin
+    if (LEN(w) = 1) and not w[0].quoted and (w[0].kind >= Csyntax.ptVar) and (w[0].kind # Csyntax.ptHome) then
+        v := try partVal(ADR(w[0]));
+        if v.kind = Ccore.kList then
+            for i := 0 to INT(v.n) - 1 do Vals.push(out, Ccore.items(v)[i]); end;
+        else
+            Vals.push(out, v);
+        end;
+        return nil;
+    end;
+    Buf.init(ADR(plain), Ccore.temps);
+    Buf.init(ADR(pat), Ccore.temps);
+    for i := 0 to LEN(w) - 1 do
+        s := Ccore.bytes(Ccore.toStr(try partVal(ADR(w[i]))));
+        Buf.str(ADR(plain), s);
+        if (w[i].kind = Csyntax.ptLit) and not w[i].quoted then
+            Buf.str(ADR(pat), s);
+            if Cglob.hasMeta(s) then wild := true; end;
+        else
+            for k := 0 to LEN(s) - 1 do
+                match s[k] of
+                | '*', '?', '[', '\\': Buf.add(ADR(pat), '\\');
+                | else:
+                end;
+                Buf.add(ADR(pat), s[k]);
+            end;
+        end;
+    end;
+    if not wild then
+        Vals.push(out, Ccore.bufVal(ADR(plain)));
+    elsif Cglob.glob(Buf.bytes(ADR(pat)), out) = 0 then
+        return Ccore.failOn(Buf.bytes(ADR(plain)), "no match");
+    end;
+    return nil;
+end;
+
+proc expandRedirs(rs: []Csyntax.Redir): ([]Rx, ERROR);
+var rx: []Rx; p: ^Rx; v: Vals.Vec; b: Buf.Buf; i: INT;
+begin
+    if LEN(rs) = 0 then return [], nil; end;
+    p := ^Rx(Ccore.alloc(LEN(rs) * SIZE(Rx)));
+    rx := p[0..LEN(rs)];
+    for i := 0 to LEN(rs) - 1 do
+        rx[i] := {kind: rs[i].kind, fd: rs[i].fd, fd2: rs[i].fd2};
+        if rs[i].kind = Csyntax.rHere then
+            Buf.init(ADR(b), Ccore.temps);
+            Buf.str(ADR(b), Ccore.bytes(try interpolate(rs[i].target)));
+            if rs[i].fd2 = 1 then Buf.add(ADR(b), '\n'); end;    (* <<< *)
+            rx[i].s := Buf.bytes(ADR(b));
+        elsif rs[i].kind # Csyntax.rDup then
+            Vals.init(ADR(v), Ccore.temps);
+            try expandWord(rs[i].target, ADR(v));
+            if v.len # 1 then return [], Ccore.fail("ambiguous redirection"); end;
+            rx[i].s := Ccore.bytes(Ccore.toStr(Vals.all(ADR(v))[0]));
+        end;
+    end;
+    return rx, nil;
+end;
+
+(* The words and redirections of c, expanded into st. *)
+proc expand(c: ^Csyntax.Cmd; st: ^Stage): ERROR;
+var i: INT;
+begin
+    Ccore.where^.line := c^.line;
+    Ccore.where^.file := c^.path;
+    Vals.init(ADR(st^.args), Ccore.temps);
+    for i := 0 to LEN(c^.words) - 1 do try expandWord(c^.words[i], ADR(st^.args)); end;
+    st^.rx := try expandRedirs(c^.redirs);
+    return nil;
+end;
+
+(* ------------------------------------------------------- procedures *)
 
 (* The list of a's items, which stay where they are. *)
 proc listOf(a: []Ccore.Val): Ccore.Val;
@@ -99,6 +1096,61 @@ begin
     def := Cvars.findProc(e^.s);
     if def = nil then return {}, Cvars.unknownRoutine(e^.s); end;
     return callProc(def, Vals.all(ADR(args)));
+end;
+
+(* ------------------------------------------------------------ traps *)
+
+(* Trap entry i's procedure run, status left as it was. *)
+proc runTrap(i: INT): ERROR;
+var def: ^Csyntax.Stmt; m: Ccore.Mark; st: INT;
+begin
+    m := Ccore.mark();
+    st := Cvars.status();
+    def := Cvars.findProc(traps[i].name);
+    if def = nil then
+        Ccore.warnOn(traps[i].name, "trap: unknown routine");
+    else
+        _ := try callProc(def, []);
+    end;
+    Cvars.setStatus(st);
+    Ccore.release(m);
+    return nil;
+end;
+
+proc runTraps: ERROR;
+var i: INT;
+begin
+    trapPending := false;
+    for i := 1 to NTrap - 1 do
+        if traps[i].pend then
+            traps[i].pend := false;
+            if traps[i].act = aProc then try runTrap(i); end;
+        end;
+    end;
+    return nil;
+end;
+
+(* The procedures of the signals trapped that came, run. *)
+proc checkTraps*: ERROR;
+begin
+    noteSignals;
+    if trapPending then return runTraps(); end;
+    return nil;
+end;
+
+(* The end of the shell, with status st: the EXIT trap first, and the
+   terminal given back. *)
+proc leave*(st: INT);
+begin
+    if not Ccore.opts^.inChild then
+        _ := checkTraps();
+        if traps[0].act = aProc then
+            traps[0].act := aDefault;
+            if runTrap(0) # nil then st := 2; end;    (* an error: the end all the same *)
+        end;
+        if jc then giveTerm(origPg); end;
+    end;
+    Sys.exit(st);
 end;
 
 (* ------------------------------------------------------ expressions *)
@@ -280,6 +1332,294 @@ begin
     end;
 end;
 
+(* --------------------------------------------------------- commands *)
+
+(* The expanded command a run in this process where it can be: a
+   procedure, a builtin; anything else in a child, waited for. *)
+proc runArgs(a: []Ccore.Val): (INT, ERROR);
+var def: ^Csyntax.Stmt; nm: Ccore.Val; bi, pid: INT;
+begin
+    if LEN(a) = 0 then return 0, nil; end;
+    nm := Ccore.toStr(a[0]);
+    def := Cvars.findProc(Ccore.bytes(nm));
+    if def # nil then
+        Cvars.setStatus(0);
+        _ := try callProc(def, a[1..LEN(a)]);
+        return Cvars.status(), nil;
+    end;
+    bi := cmdBuiltin(nm);
+    if bi # 0 then return runCmdBuiltin(bi, a); end;
+    correct(a);
+    pid := try fork();
+    if pid = 0 then
+        childJob(0, true);
+        execExternal(a);
+    end;
+    return waitFg(pid, 0, a);
+end;
+
+proc isExternal(c: ^Csyntax.Cmd; st: ^Stage): BOOL;
+begin
+    return (c^.call = nil) and (c^.stmt = nil) and extWords(Vals.all(ADR(st^.args)));
+end;
+
+(* The command c, expanded into st, run in this process: its status. *)
+proc inProc(c: ^Csyntax.Cmd; st: ^Stage): (INT, ERROR);
+begin
+    if c^.stmt # nil then
+        try execStmt(c^.stmt);
+        return Cvars.status(), nil;
+    end;
+    if c^.call # nil then
+        _ := try eval(c^.call);
+        return Cvars.status(), nil;
+    end;
+    return runArgs(Vals.all(ADR(st^.args)));
+end;
+
+(* A pipeline of one command; tail if it may exec over the shell. *)
+proc runSingle(c: ^Csyntax.Cmd; tail: BOOL): (INT, ERROR);
+var st: Stage; pid, lvl, r: INT; ok: BOOL; err: ERROR;
+begin
+    if (c^.call = nil) and (c^.stmt = nil) then subSt := ADR(st); end;
+    try expand(c, ADR(st));
+    if isExternal(c, ADR(st)) then
+        if tail then
+            ok := try redirect(st.rx, false);
+            if not ok then Sys.exit(1); end;
+            execExternal(Vals.all(ADR(st.args)));
+        end;
+        correct(Vals.all(ADR(st.args)));
+        pid := try fork();
+        if pid = 0 then
+            childJob(subPg, true);
+            ok := try redirect(st.rx, false);
+            if not ok then Sys.exit(1); end;
+            execExternal(Vals.all(ADR(st.args)));
+        end;
+        return waitFg(pid, subPg, Vals.all(ADR(st.args)));
+    end;
+    lvl := nsave;
+    r := 1;
+    ok, err := redirect(st.rx, true);
+    if ok and (err = nil) then r, err := inProc(c, ADR(st)); end;
+    if keepFds and (err = nil) then commitFds(lvl); else restoreFds(lvl); end;
+    keepFds := false;
+    return r, err;
+end;
+
+(* A pipeline of several commands, each in a child. *)
+proc runMulti(cmds: []^Csyntax.Cmd): (INT, ERROR);
+var
+    sv: Stages.Vec; pv: Ints.Vec; sts: []Stage; pids: []INT; b: Buf.Buf;
+    n, i, st, r, w, prev, pg, res: INT; pf, ok: BOOL;
+begin
+    n := LEN(cmds);
+    Stages.init(ADR(sv), Ccore.temps);
+    Stages.resize(ADR(sv), n);
+    sts := Stages.all(ADR(sv));
+    Ints.init(ADR(pv), Ccore.temps);
+    Ints.resize(ADR(pv), n);
+    pids := Ints.all(ADR(pv));
+    for i := 0 to n - 1 do try expand(cmds[i], ADR(sts[i])); end;
+    prev := -1;
+    pg := subPg;    (* the job's group: a <(...)'s, or the first stage's *)
+    for i := 0 to n - 1 do
+        if isExternal(cmds[i], ADR(sts[i])) then correct(Vals.all(ADR(sts[i].args))); end;
+        if i < n - 1 then
+            r, w := Sys.pipe();
+            if r < 0 then return 0, Ccore.fail("cannot make pipe"); end;
+        end;
+        pids[i] := try fork();
+        if pids[i] = 0 then
+            childJob(pg, true);
+            if prev >= 0 then
+                _ := Sys.dupTo(prev, 0);
+                Sys.close(prev);
+            end;
+            if i < n - 1 then
+                Sys.close(r);
+                _ := Sys.dupTo(w, 1);
+                Sys.close(w);
+            end;
+            ok := try redirect(sts[i].rx, false);
+            if not ok then Sys.exit(1); end;
+            if isExternal(cmds[i], ADR(sts[i])) then execExternal(Vals.all(ADR(sts[i].args))); end;
+            st, _ := inProc(cmds[i], ADR(sts[i]));
+            Sys.exit(st);
+        end;
+        joinGroup(pids[i], pg, true);
+        if pg = 0 then pg := pids[i]; end;
+        if prev >= 0 then Sys.close(prev); end;
+        if i < n - 1 then
+            Sys.close(w);
+            prev := r;
+        end;
+    end;
+    if jc then
+        Buf.init(ADR(b), Ccore.temps);
+        for i := 0 to n - 1 do
+            if i > 0 then Buf.str(ADR(b), " | "); end;
+            argsName(Vals.all(ADR(sts[i].args)), ADR(b));
+        end;
+        return foreground(pids, pg, Buf.bytes(ADR(b)));
+    end;
+    pf := Cvars.flag("pipefail");
+    intSeen := false;
+    for i := 0 to n - 1 do
+        if i = n - 1 then intr := intr or intSeen; end;    (* the last stage decides *)
+        st := waitFor(pids[i]);
+        if not pf or (st # 0) then res := st; end;
+    end;
+    return res, nil;
+end;
+
+(* A pipeline, single or not. A command run while another's words
+   expand, in $(f()), has <(...)s of its own, aside from the other's. *)
+proc runPipe(p: Csyntax.Pipe): (INT, ERROR);
+var tail, sAll: BOOL; lvl, sPg, r: INT; sSt: ^Stage; err: ERROR;
+begin
+    tail := tailOk;
+    tailOk := false;
+    lvl := nsub;
+    sPg := subPg;
+    sSt := subSt;
+    sAll := subAll;
+    subPg := 0;
+    subSt := nil;
+    subAll := LEN(p.cmds) > 1;
+    if LEN(p.cmds) = 1 then r, err := runSingle(p.cmds[0], tail); else r, err := runMulti(p.cmds); end;
+    closeSubs(lvl);
+    subPg := sPg;
+    subSt := sSt;
+    subAll := sAll;
+    if err # nil then return 0, err; end;
+    Cvars.setStatus(r);
+    return r, nil;
+end;
+
+(* a && b || c: all but the last pipeline exempt from errexit. *)
+proc runChain(pipes: []Csyntax.Pipe): (INT, ERROR);
+var r, i: INT; ran: BOOL; err: ERROR;
+begin
+    ran := true;
+    for i := 0 to LEN(pipes) - 1 do
+        if i > 0 then ran := (pipes[i - 1].join = Csyntax.jAnd) = (r = 0); end;
+        if ran then
+            if i < LEN(pipes) - 1 then INC(exempt); end;
+            r, err := runPipe(pipes[i]);
+            if i < LEN(pipes) - 1 then DEC(exempt); end;
+            if err # nil then return 0, err; end;
+        end;
+    end;
+    chainSkipped := not ran;
+    return r, nil;
+end;
+
+(* A background list's name: its words as written, for they are
+   expanded only in the job. *)
+proc listName(pipes: []Csyntax.Pipe; b: ^Buf.Buf);
+var c: ^Csyntax.Cmd; i, j, k, m: INT;
+begin
+    for i := 0 to LEN(pipes) - 1 do
+        for j := 0 to LEN(pipes[i].cmds) - 1 do
+            c := pipes[i].cmds[j];
+            if (LEN(c^.words) = 0) or (c^.call # nil) then Buf.str(b, "..."); end;
+            for k := 0 to LEN(c^.words) - 1 do
+                for m := 0 to LEN(c^.words[k]) - 1 do
+                    match c^.words[k][m].kind of
+                    | ptLit: Buf.str(b, c^.words[k][m].s);
+                    | ptVar:
+                        Buf.add(b, '$');
+                        Buf.str(b, c^.words[k][m].s);
+                    | ptHome:
+                        Buf.add(b, '~');
+                        Buf.str(b, c^.words[k][m].s);
+                    | else: Buf.str(b, "...");
+                    end;
+                end;
+                if k < LEN(c^.words) - 1 then Buf.add(b, ' '); end;
+            end;
+            if j < LEN(pipes[i].cmds) - 1 then Buf.str(b, " | "); end;
+        end;
+        if i < LEN(pipes) - 1 then
+            if pipes[i].join = Csyntax.jAnd then Buf.str(b, " && "); else Buf.str(b, " || "); end;
+        end;
+    end;
+end;
+
+(* A command statement. One run with & is a process group of its own,
+   led by the shell that runs it, so that a signal sent to that shell
+   reaches the whole list: killing lastpid stops every stage of a
+   pipeline. Under job control it is a job, which may read the terminal
+   (and stop) and takes Ctrl-C when brought to the foreground; without,
+   it reads /dev/null and ignores Ctrl-C. SIGINT and SIGQUIT are left
+   alone: the terminal sends them to the group already, or they are
+   ignored. *)
+proc runAndOr(s: ^Csyntax.Stmt): (INT, ERROR);
+var b: Buf.Buf; pids: [1]INT; pid, fd, i, k: INT; own: BOOL;
+begin
+    if not s^.bg then return runChain(s^.pipes); end;
+    own := jc;
+    pid := try fork();
+    if pid = 0 then
+        childJob(0, false);
+        _ := Sys.setGroup(0, 0);
+        for i := 1 to NTrap - 1 do
+            if (TrapSigs[i] = Sys.sigInt) or (TrapSigs[i] = Sys.sigQuit) then
+                if not own then setSig(i, dIgnore); end;
+            elsif traps[i].act # aIgnore then
+                setSig(i, dPassOn);
+            end;
+        end;
+        if not own then
+            fd := Sys.openRead("/dev/null");
+            if fd >= 0 then _ := place(fd, 0, false); end;
+        end;
+        tailOk := LEN(s^.pipes) = 1;
+        k, _ := runChain(s^.pipes);
+        Sys.exit(k);
+    end;
+    _ := Sys.setGroup(pid, pid);
+    Buf.init(ADR(b), Ccore.temps);
+    listName(s^.pipes, ADR(b));
+    pids[0] := pid;
+    k := newJob(pids, pid, Buf.bytes(ADR(b)));
+    if interactive then report(k, Ccore.text("{}", [Fmt.int(pid)])); end;
+    try Cvars.store(Cvars.global("lastpid"), Ccore.intVal(pid));
+    return 0, nil;
+end;
+
+(* At the prompt: the jobs that finished or stopped since, said. *)
+proc reapJobs*;
+var e: Ended; j: ^Job; pid, k: INT;
+begin
+    while true do
+        pid, e.how, e.n := Sys.wait(-1, false);
+        if pid <= 0 then break; end;
+        if e.how = Sys.stopped then
+            k := findJob(pid);
+            if (k >= 0) and not Jobs.all(ADR(jobs))[k].stopped then
+                Jobs.all(ADR(jobs))[k].stopped := true;
+                report(makeCurrent(k), "stopped");
+            end;
+        else
+            k := reaped(pid, e);
+            if k >= 0 then
+                j := ADR(Jobs.all(ADR(jobs))[k]);
+                if j^.left = 0 then
+                    if j^.ends[LEN(j^.ends) - 1].how = Sys.killed then
+                        report(k, "killed");
+                    else
+                        report(k, Ccore.text("done {}", [Fmt.int(jobStatus(k))]));
+                    end;
+                    dropJob(k);
+                end;
+            end;
+        end;
+    end;
+end;
+
 (* ------------------------------------------------------- statements *)
 
 (* x[i] := v: a list's ith item, from 0, or a string's ith byte, from 1,
@@ -416,15 +1756,28 @@ begin
     return nil;
 end;
 
-proc execStmt(s: ^Csyntax.Stmt): ERROR;
-var m: Ccore.Mark; v: Ccore.Val;
+(* errexit: the end of the script, or of the line at the prompt, with
+   the status. *)
+proc errExit: ERROR;
 begin
+    if Ccore.opts^.inChild then Sys.exit(Cvars.status()); end;
+    return Ccore.ErrExit;
+end;
+
+proc execStmt(s: ^Csyntax.Stmt): ERROR;
+var m: Ccore.Mark; v: Ccore.Val; st: INT;
+begin
+    noteSignals;
+    if intr then return interrupted(); end;
+    if trapPending then try runTraps(); end;
     Ccore.where^.line := s^.line;
     Ccore.where^.file := s^.path;
     m := Ccore.mark();
     defer Ccore.release(m);
     match s^.kind of
-    | sCmd: _ := try runAndOr(s);
+    | sCmd:
+        st := try runAndOr(s);
+        if (st # 0) and (exempt = 0) and not chainSkipped and Cvars.flag("errexit") then return errExit(); end;
     | sAssign:
         v := try eval(s^.e);
         if s^.e2 = nil then try Cvars.assign(s^.s, v); else try setIndex(s, v); end;
@@ -472,9 +1825,52 @@ end;
 (* After an error: the shell as it is between statements. *)
 proc recover*;
 begin
+    restoreFds(0);
+    closeSubs(0);
     Cvars.leave({});
     curFunc := nil;
     ctl := cNone;
+    tailOk := false;
+    keepFds := false;
+    exempt := 0;
+    intr := false;
 end;
 
+(* ------------------------------------------------------------ setup *)
+
+(* The shell's globals at its start: the environment, PWD, the
+   switches, lastpid, pid and status. *)
+proc initShell*;
+var r: ^Cvars.Var; d: []U8; e: INT;
+begin
+    Cvars.importEnv;
+    d, e := Sys.workDir();
+    if e = 0 then
+        r := Cvars.global("PWD");
+        _ := Cvars.store(r, Ccore.strVal(d));
+        r^.exported := true;
+    end;
+    _ := Cvars.store(Cvars.global("errexit"), Ccore.boolVal(false));
+    _ := Cvars.store(Cvars.global("lastpid"), Ccore.intVal(0));
+    _ := Cvars.store(Cvars.global("pipefail"), Ccore.boolVal(false));
+    r := Cvars.global("pid");
+    _ := Cvars.store(r, Ccore.intVal(Sys.pid()));
+    r^.exported := false;
+    r^.readOnly := true;
+    Cvars.setStatus(0);
+end;
+
+(* args: the command line's arguments from first on. *)
+proc setArgs*(first: INT);
+var out: Vals.Vec; m: Ccore.Mark; i: INT;
+begin
+    m := Ccore.mark();
+    Vals.init(ADR(out), Ccore.temps);
+    for i := first to ARGC() - 1 do Vals.push(ADR(out), Ccore.strVal(Files.arg(i))); end;
+    _ := Cvars.store(Cvars.global("args"), Ccore.listVal(ADR(out)));
+    Ccore.release(m);
+end;
+
+begin
+    Jobs.init(ADR(jobs), Heap.heap);
 end Cinterp.

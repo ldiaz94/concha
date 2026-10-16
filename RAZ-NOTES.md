@@ -11,6 +11,19 @@ what was wanted, what concha does instead, and how much it cost.
   group and the rest, was proposed in two parts and is in raz 0.16.0;
   `Ckern` went with it.
 
+- **`Sys.exec` is `spawn`'s, not a shell's.** It gives the program
+  every signal as it is at first, ignored ones too, and looks for it
+  along the process's own `PATH`. A shell's `exec` is execve's: a
+  signal the shell handles goes back to what it does at first, one it
+  ignores stays ignored (`trap '' HUP` before a long command, a
+  script's background job ignoring SIGINT), and the program is looked
+  for along the shell's `PATH` variable, which needn't be exported.
+  concha has `Ckern.execve`, a `SYSCALL` in a file of its own, and
+  does the search, and sh's ENOEXEC fallback, itself. Wanted: a
+  `Program` field that keeps ignored signals ignored, or an
+  `execve(path, args, env)` in `Sys` that does no more than the
+  kernel's.
+
 ## The language
 
 - **A slice's pointer can't be had.** The report gives a slice's

@@ -52,8 +52,20 @@ before it is started, not after.
         returns, where the Pascal left it for `Recover`. Checked
         against the Pascal on 42 scripts of expressions, statements
         and errors, by the globals they leave and what they say.
-  - [ ] (b) words, expansion, redirections, processes, pipes, jobs,
-        signals and traps; `Cglob`.
+  - [x] (b) words, expansion, redirections, processes, pipes, jobs,
+        signals and traps; `Cglob`. `Ckern` is back for one call,
+        execve: `Sys.exec` gives a program every signal as it is at
+        first, ignored ones too, where `trap ''` and a script's
+        background jobs keep theirs, and looks along the process's
+        PATH, not the shell's (RAZ-NOTES.md). A signal is seen where
+        the shell looks: before each statement, and where a system
+        call it interrupted gave up; so the REPL must call
+        `noteSignals` when `editLine` ends, or a hangup at the prompt
+        reaches no job. Checked against the Pascal on 40 scripts of
+        pipelines, redirections, here strings, captures, `<(...)`,
+        globs, errexit, pipefail, exec failures, background lists and
+        signals, by standard output, standard error and status. Job
+        control wants a terminal, and is checked at step 7.
   - [ ] (c) the builtins.
   - [ ] (d) completion, the spec files and the hooks; `Ccomplete`.
 - [ ] 7. `Concha`: the command line, the REPL, startup, the queries.
