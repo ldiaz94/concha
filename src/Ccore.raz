@@ -305,10 +305,10 @@ begin
 end;
 
 (* The list of v's items, which stay where they are. *)
-proc listVal*(v: ^Vals.Vec): Val;
+proc listVal*(var v: Vals.Vec): Val;
 var a: []Val;
 begin
-    a := Vals.all(v^);
+    a := Vals.all(v);
     if LEN(a) = 0 then return {kind: kList}; end;
     return {kind: kList, n: LEN(a), p: ^U8(ADR(a[0]))};
 end;
@@ -377,28 +377,28 @@ begin
 end;
 
 (* v as text, added to b: a list's items with spaces between. *)
-proc strInto(b: ^Buf.Buf; v: Val);
+proc strInto(var b: Buf.Buf; v: Val);
 var s: []Val; i: INT;
 begin
     match v.kind of
     | kNil:
-    | kBool: if v.n # 0 then Buf.str(b^, "true"); else Buf.str(b^, "false"); end;
-    | kInt: Fmt.write(b^, "{}", [Fmt.int(v.n)]);
-    | kStr: Buf.str(b^, bytes(v));
+    | kBool: if v.n # 0 then Buf.str(b, "true"); else Buf.str(b, "false"); end;
+    | kInt: Fmt.write(b, "{}", [Fmt.int(v.n)]);
+    | kStr: Buf.str(b, bytes(v));
     | kList:
         s := items(v);
         for i := 0 to LEN(s) - 1 do
-            if i > 0 then Buf.add(b^, ' '); end;
+            if i > 0 then Buf.add(b, ' '); end;
             strInto(b, s[i]);
         end;
     end;
 end;
 
 (* The string in the arena that the buffer b, grown in temps, holds. *)
-proc bufVal*(b: ^Buf.Buf): Val;
+proc bufVal*(var b: Buf.Buf): Val;
 var s: []U8;
 begin
-    s := Buf.bytes(b^);
+    s := Buf.bytes(b);
     if LEN(s) = 0 then return {kind: kStr}; end;
     return {kind: kStr, n: LEN(s), p: ADR(s[0])};
 end;
@@ -409,8 +409,8 @@ var b: Buf.Buf;
 begin
     if v.kind = kStr then return v; end;
     Buf.init(b, temps);
-    strInto(ADR(b), v);
-    return bufVal(ADR(b));
+    strInto(b, v);
+    return bufVal(b);
 end;
 
 proc isSpace(c: U8): BOOL;
@@ -583,17 +583,17 @@ begin
 end;
 
 (* The file at path added to b: 0, or minus an errno. *)
-proc readFile*(path: []U8; b: ^Buf.Buf): INT;
+proc readFile*(path: []U8; var b: Buf.Buf): INT;
 var fd, k: INT; s: []U8;
 begin
     fd := Sys.openRead(path);
     if fd < 0 then return fd; end;
     defer Sys.close(fd);
     while true do
-        s := Buf.spare(b^, 10000H);
+        s := Buf.spare(b, 10000H);
         k := Sys.read(fd, s);
         if k = 0 then break; end;
-        if k > 0 then INC(b^.len, k);
+        if k > 0 then INC(b.len, k);
         elsif k # -errIntr then return k;
         end;
     end;

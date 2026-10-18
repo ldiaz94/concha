@@ -45,15 +45,15 @@ begin
 end;
 
 (* v in decimal added to b, at least w digits wide, padded with pad. *)
-proc num(b: ^Buf.Buf; v: I64; w: INT; pad: U8);
+proc num(var b: Buf.Buf; v: I64; w: INT; pad: U8);
 var d: [20]U8; k: INT;
 begin
     d, k := Str.fromInt(v);
     while w > k do
-        Buf.add(b^, pad);
+        Buf.add(b, pad);
         DEC(w);
     end;
-    Buf.str(b^, d[0..k]);
+    Buf.str(b, d[0..k]);
 end;
 
 (* fmt with the instant ms, milliseconds since 1970, in the local time
@@ -81,19 +81,19 @@ begin
         c := fmt[i];
         INC(i);
         match c of
-        | 'Y': num(ADR(b), y, 4, '0');
-        | 'y': num(ADR(b), y mod 100, 2, '0');
-        | 'm': num(ADR(b), m, 2, '0');
-        | 'd': num(ADR(b), d, 2, '0');
-        | 'e': num(ADR(b), d, 2, ' ');
-        | 'H': num(ADR(b), sod div 3600, 2, '0');
-        | 'M': num(ADR(b), sod div 60 mod 60, 2, '0');
-        | 'S': num(ADR(b), sod mod 60, 2, '0');
+        | 'Y': num(b, y, 4, '0');
+        | 'y': num(b, y mod 100, 2, '0');
+        | 'm': num(b, m, 2, '0');
+        | 'd': num(b, d, 2, '0');
+        | 'e': num(b, d, 2, ' ');
+        | 'H': num(b, sod div 3600, 2, '0');
+        | 'M': num(b, sod div 60 mod 60, 2, '0');
+        | 'S': num(b, sod mod 60, 2, '0');
         | 'a': Buf.str(b, DayNames[wd][0..3]);
         | 'A': Buf.str(b, DayNames[wd]);
         | 'b': Buf.str(b, MonthNames[m - 1][0..3]);
         | 'B': Buf.str(b, MonthNames[m - 1]);
-        | 's': num(ADR(b), secs, 1, '0');
+        | 's': num(b, secs, 1, '0');
         | 'z':
             off := zoff div 60;
             if off < 0 then
@@ -102,22 +102,22 @@ begin
             else
                 Buf.add(b, '+');
             end;
-            num(ADR(b), off div 60, 2, '0');
-            num(ADR(b), off mod 60, 2, '0');
+            num(b, off div 60, 2, '0');
+            num(b, off mod 60, 2, '0');
         | 'Z': Buf.str(b, abbr);
         | 'F':
-            num(ADR(b), y, 4, '0');
+            num(b, y, 4, '0');
             Buf.add(b, '-');
-            num(ADR(b), m, 2, '0');
+            num(b, m, 2, '0');
             Buf.add(b, '-');
-            num(ADR(b), d, 2, '0');
+            num(b, d, 2, '0');
         | 'T', 'R':
-            num(ADR(b), sod div 3600, 2, '0');
+            num(b, sod div 3600, 2, '0');
             Buf.add(b, ':');
-            num(ADR(b), sod div 60 mod 60, 2, '0');
+            num(b, sod div 60 mod 60, 2, '0');
             if c = 'T' then
                 Buf.add(b, ':');
-                num(ADR(b), sod mod 60, 2, '0');
+                num(b, sod mod 60, 2, '0');
             end;
         | '%': Buf.add(b, '%');
         | else: return "", Ccore.fail(Ccore.text("unknown time format %{}", [Fmt.char(c)]));

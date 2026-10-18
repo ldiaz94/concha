@@ -453,7 +453,7 @@ end;
 
 (* A '...' at pos, its text added to b; '' in it is one '. If it runs to
    the end, the error is at qPos on qLine. *)
-proc quotedInto(b: ^Buf.Buf; qPos, qLine: INT): ERROR;
+proc quotedInto(var b: Buf.Buf; qPos, qLine: INT): ERROR;
 begin
     adv;
     while true do
@@ -462,7 +462,7 @@ begin
             adv;
             if ch() # '\'' then return nil; end;
         end;
-        Buf.add(b^, ch());
+        Buf.add(b, ch());
         adv;
     end;
 end;
@@ -474,7 +474,7 @@ begin
     Buf.init(b, Ccore.temps);
     while (ch() = '\'') or (ch() = '#') do
         if ch() = '\'' then
-            try quotedInto(ADR(b), tokPos, tokLine);
+            try quotedInto(b, tokPos, tokLine);
         else
             adv;
             if not isDigit(ch()) then return synErr("expected character code"); end;
@@ -668,16 +668,16 @@ begin
 end;
 
 (* The text gathered in b, as a part at the end of l. *)
-proc addLit(l: ^Parts.Vec; b: ^Buf.Buf; quoted: BOOL);
+proc addLit(var l: Parts.Vec; var b: Buf.Buf; quoted: BOOL);
 begin
-    Parts.push(l^, {kind: ptLit, quoted: quoted, s: Ccore.perm(Buf.bytes(b^))});
-    Buf.reset(b^);
+    Parts.push(l, {kind: ptLit, quoted: quoted, s: Ccore.perm(Buf.bytes(b))});
+    Buf.reset(b);
 end;
 
 (* A $name, ${name} or $(expression) at pos, as a part at the end of l,
    after the text gathered in b if there is any; false, with nothing
    read, if the $ starts none of them. *)
-proc dollar(l: ^Parts.Vec; b: ^Buf.Buf; quoted: BOOL): (BOOL, ERROR);
+proc dollar(var l: Parts.Vec; var b: Buf.Buf; quoted: BOOL): (BOOL, ERROR);
 var p: Part; e: INT;
 begin
     p.quoted := quoted;
@@ -707,8 +707,8 @@ begin
         p.s := Ccore.perm(src[pos..e]);
         pos := e;
     end;
-    if b^.len > 0 then addLit(l, b, quoted); end;
-    Parts.push(l^, p);
+    if b.len > 0 then addLit(l, b, quoted); end;
+    Parts.push(l, p);
     return true, nil;
 end;
 
@@ -726,7 +726,7 @@ end;
 (* Interpolated text as parts at the end of l: a "..." string's, from
    after its opening " to after its closing one; or, if here, a heredoc's
    body, up to limit, each line with up to indent blanks taken off. *)
-proc interpolate(l: ^Parts.Vec; here: BOOL; limit, indent: INT): ERROR;
+proc interpolate(var l: Parts.Vec; here: BOOL; limit, indent: INT): ERROR;
 var b: Buf.Buf; qPos, qLine: INT; c: U8;
 begin
     Buf.init(b, Ccore.temps);
@@ -746,13 +746,13 @@ begin
             adv;
             Buf.add(b, ch());
             adv;
-        elsif (c # '$') or not try dollar(l, ADR(b), true) then    (* a $ that starts no part is itself *)
+        elsif (c # '$') or not try dollar(l, b, true) then    (* a $ that starts no part is itself *)
             Buf.add(b, c);
             adv;
             if here and (c = '\n') then dedent(indent, limit); end;
         end;
     end;
-    if b.len > 0 then addLit(l, ADR(b), true); end;
+    if b.len > 0 then addLit(l, b, true); end;
     return nil;
 end;
 
@@ -785,7 +785,7 @@ begin
     | tDStr:
         e := newExpr(eInterp);
         Parts.init(l, Heap.heap);
-        try interpolate(ADR(l), false, 0, 0);
+        try interpolate(l, false, 0, 0);
         e^.parts := Parts.all(l);
         try next();
     | tBack:
@@ -945,18 +945,18 @@ begin
             p.cap := try capture();
             Parts.push(l, p);
         | '\'':
-            try quotedInto(ADR(b), pos, line);
-            addLit(ADR(l), ADR(b), true);
+            try quotedInto(b, pos, line);
+            addLit(l, b, true);
         | '"':
             adv;
             n := l.len;
-            try interpolate(ADR(l), false, 0, 0);
+            try interpolate(l, false, 0, 0);
             if l.len = n then Parts.push(l, {kind: ptLit, quoted: true}); end;
         | '$':
-            if not try dollar(ADR(l), ADR(b), false) then
+            if not try dollar(l, b, false) then
                 Buf.add(b, '$');
                 adv;
-                addLit(ADR(l), ADR(b), false);
+                addLit(l, b, false);
             end;
         | '\\':
             adv;
@@ -966,7 +966,7 @@ begin
                 if pos >= LEN(src) then return [], synErr("backslash at end of input"); end;
                 Buf.add(b, ch());
                 adv;
-                addLit(ADR(l), ADR(b), true);
+                addLit(l, b, true);
             end;
         | '~':
             e := pos + 1;
@@ -977,7 +977,7 @@ begin
             else
                 Buf.add(b, '~');
                 adv;
-                addLit(ADR(l), ADR(b), false);
+                addLit(l, b, false);
             end;
         | else:
             (* plain text; in NAME=value, up to a ~ after the = or a : *)
@@ -985,7 +985,7 @@ begin
                 Buf.add(b, ch());
                 adv;
             end;
-            addLit(ADR(l), ADR(b), false);
+            addLit(l, b, false);
             home := ch() = '~';    (* only after such a stop *)
         end;
     end;
@@ -1132,7 +1132,7 @@ begin
                 INC(i);
             end;
         end;
-        addLit(ADR(l), ADR(t), true);
+        addLit(l, t, true);
     else
         sp := pos;
         sl := line;
@@ -1140,7 +1140,7 @@ begin
             if src[j] = '\n' then INC(line); end;
         end;
         pos := start;
-        try interpolate(ADR(l), true, ls, ind);
+        try interpolate(l, true, ls, ind);
         pos := sp;
         line := sl;
     end;

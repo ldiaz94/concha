@@ -318,19 +318,19 @@ end;
    whole year (EST5EDT,0/0,J365/25) ends with an autumn change at the
    instant of next year's spring one, which is laid out last, so that
    it is summer throughout, as zic means. *)
-proc daylight(r: ^Rule; t, tableEnd: I64): (BOOL, BOOL);
+proc daylight(const r: Rule; t, tableEnd: I64): (BOOL, BOOL);
 var at: [6]I64; dst: [6]BOOL; n, y0, y, i, k: INT; when: I64; d, found: BOOL;
 begin
     n := 0;
-    y0 := yearFromDays(dayOf(t + r^.std.off));
+    y0 := yearFromDays(dayOf(t + r.std.off));
     for y := y0 - 1 to y0 + 1 do
         for k := 0 to 1 do
             (* daylight time begins on the standard clock, and ends on its own *)
             d := k = 0;
             if d then
-                when := I64(changeDay(r^.start, y)) * 86400 + r^.start.time - r^.std.off;
+                when := I64(changeDay(r.start, y)) * 86400 + r.start.time - r.std.off;
             else
-                when := I64(changeDay(r^.stop, y)) * 86400 + r^.stop.time - r^.dst.off;
+                when := I64(changeDay(r.stop, y)) * 86400 + r.stop.time - r.dst.off;
             end;
             i := n;
             while (i > 0) and (at[i - 1] > when) do
@@ -511,7 +511,7 @@ begin
         return c.off, c.abbr;
     end;
     if not zone.rule.hasDst then return zone.rule.std.off, zone.rule.std.abbr; end;
-    dst, found := daylight(ADR(zone.rule), t, tableEnd);
+    dst, found := daylight(zone.rule, t, tableEnd);
     if not found then
         return c.off, c.abbr;
     elsif dst then

@@ -26,7 +26,7 @@ const
 type
     (* The user's complete function, asked what the word p might become
        after words: its answers added to ans *)
-    Asker* = proc(p: []U8; words: []Ccore.Val; ans: ^Vals.Vec);
+    Asker* = proc(p: []U8; words: []Ccore.Val; var ans: Vals.Vec);
 
     How = (prefix, fuzzy);    (* a name starts with the word, or holds its letters in order *)
 
@@ -69,10 +69,10 @@ end;
 (* out ordered best match first for p, by Cfuzzy, each name from byte
    off on; ties go to the shorter name, then the first in byte order,
    and repeats are dropped. *)
-proc rank(out: ^Vals.Vec; off: INT; p: []U8);
+proc rank(var out: Vals.Vec; off: INT; p: []U8);
 var sv: Ints.Vec; a: []Ccore.Val; sc: []INT; v: Ccore.Val; i, j, k, t: INT; ex: BOOL;
 begin
-    a := Vals.all(out^);
+    a := Vals.all(out);
     Ints.init(sv, Ccore.temps);
     Ints.resize(sv, LEN(a));
     sc := Ints.all(sv);
@@ -99,7 +99,7 @@ begin
             INC(k);
         end;
     end;
-    Vals.resize(out^, k);
+    Vals.resize(out, k);
 end;
 
 (* Is the file f a program this user may run? *)
@@ -110,7 +110,7 @@ end;
 
 (* The names in the directory from that fit base, as how says and show
    allows, added to out as pre and the name, a directory's with a /. *)
-proc listDir(from, pre, base: []U8; show: Show; how: How; out: ^Vals.Vec);
+proc listDir(from, pre, base: []U8; show: Show; how: How; var out: Vals.Vec);
 var d: Sys.Dir; b: Buf.Buf; nm, full: []U8; k: Cglob.Kind; ok: BOOL;
 begin
     if Sys.openDir(d, from) # 0 then return; end;
@@ -129,7 +129,7 @@ begin
                 Buf.str(b, pre);
                 Buf.str(b, nm);
                 if k = Cglob.dir then Buf.add(b, '/'); end;
-                Vals.push(out^, Ccore.bufVal(ADR(b)));
+                Vals.push(out, Ccore.bufVal(b));
             end;
         end;
         nm, ok := Sys.nextEntry(d);
@@ -139,7 +139,7 @@ end;
 
 (* The programs along PATH whose names fit base, as how says, added to
    out. *)
-proc alongPath(base: []U8; how: How; out: ^Vals.Vec);
+proc alongPath(base: []U8; how: How; var out: Vals.Vec);
 var path, dir: []U8; more: BOOL;
 begin
     path := Cvars.searchPath();
@@ -157,15 +157,15 @@ end;
 proc suggestCommand*(name: []U8): []U8;
 var b: Cvars.Best; progs: Vals.Vec; p: []^Csyntax.Stmt; v: []Ccore.Val; s: []U8; i: INT;
 begin
-    Cvars.bestInit(ADR(b));
-    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do Cvars.consider(ADR(b), Csyntax.CmdBuiltins[i].name, name); end;
+    Cvars.bestInit(b);
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do Cvars.consider(b, Csyntax.CmdBuiltins[i].name, name); end;
     p := Cvars.allProcs();
-    for i := 0 to LEN(p) - 1 do Cvars.consider(ADR(b), p[i]^.s, name); end;
+    for i := 0 to LEN(p) - 1 do Cvars.consider(b, p[i]^.s, name); end;
     Vals.init(progs, Ccore.temps);
-    alongPath("", prefix, ADR(progs));
+    alongPath("", prefix, progs);
     v := Vals.all(progs);
-    for i := 0 to LEN(v) - 1 do Cvars.consider(ADR(b), Ccore.bytes(v[i]), name); end;
-    s := Cvars.bestName(ADR(b), LEN(name));
+    for i := 0 to LEN(v) - 1 do Cvars.consider(b, Ccore.bytes(v[i]), name); end;
+    s := Cvars.bestName(b, LEN(name));
     if s = name then return ""; end;    (* a program listed may still fail, with a bad #! line *)
     return s;
 end;
@@ -186,7 +186,7 @@ begin
     m := Ccore.mark();
     Buf.init(b, Ccore.temps);
     if Str.find(p, "/") >= 0 then
-        if (p[0] # '~') or not Cvars.tilde(p, ADR(b)) then Buf.str(b, p); end;
+        if (p[0] # '~') or not Cvars.tilde(p, b) then Buf.str(b, p); end;
         known := runs(Buf.bytes(b));
     else
         path := Cvars.searchPath();
@@ -225,7 +225,7 @@ end;
    lines: blanks part them, a # starting a field ends the line, and \
    takes the next byte as it is. Every line is kept, empty ones too, so
    that the first is the first. *)
-proc specLines(t: []U8; lines: ^Vals.Vec);
+proc specLines(t: []U8; var lines: Vals.Vec);
 var f: Buf.Buf; fields: Vals.Vec; i: INT;
 begin
     i := 0;
@@ -243,33 +243,33 @@ begin
                     Buf.add(f, t[i]);
                     INC(i);
                 end;
-                Vals.push(fields, Ccore.bufVal(ADR(f)));
+                Vals.push(fields, Ccore.bufVal(f));
             end;
         end;
         INC(i);
-        Vals.push(lines^, Ccore.listVal(ADR(fields)));
+        Vals.push(lines, Ccore.listVal(fields));
     end;
 end;
 
 (* The file at path, if it is one this concha reads: a regular file of
    at most MaxSpec bytes whose first line is "complete 1". *)
-proc specLoad(path: []U8; lines: ^Vals.Vec): BOOL;
+proc specLoad(path: []U8; var lines: Vals.Vec): BOOL;
 var info: Sys.Info; b: Buf.Buf; f: []Ccore.Val; err: INT;
 begin
     info, err := Sys.info(path);
     if (err # 0) or not info.file or (info.size > MaxSpec) then return false; end;
     Buf.init(b, Ccore.temps);
-    if Ccore.readFile(path, ADR(b)) < 0 then return false; end;
-    Vals.init(lines^, Ccore.temps);
+    if Ccore.readFile(path, b) < 0 then return false; end;
+    Vals.init(lines, Ccore.temps);
     specLines(Buf.bytes(b), lines);
-    if lines^.len = 0 then return false; end;
-    f := Ccore.items(Vals.all(lines^)[0]);
+    if lines.len = 0 then return false; end;
+    f := Ccore.items(Vals.all(lines)[0]);
     return (LEN(f) >= 2) and (Ccore.bytes(f[0]) = "complete") and (Ccore.bytes(f[1]) = "1");
 end;
 
 (* For specFind: the completion file name under the directory d, or
    under its .local/share if local, into lines. *)
-proc under(d: []U8; local: BOOL; name: []U8; lines: ^Vals.Vec): BOOL;
+proc under(d: []U8; local: BOOL; name: []U8; var lines: Vals.Vec): BOOL;
 var b: Buf.Buf;
 begin
     if (LEN(d) = 0) or (d[0] # '/') then return false; end;
@@ -286,7 +286,7 @@ end;
    $XDG_DATA_DIRS (/usr/local/share:/usr/share), the first that can be
    read. A directory that isn't absolute doesn't count, as the XDG base
    directory rules have it. *)
-proc specFind(cmd: []U8; lines: ^Vals.Vec): BOOL;
+proc specFind(cmd: []U8; var lines: Vals.Vec): BOOL;
 var name, dirs, d: []U8; i: INT; more: BOOL;
 begin
     i := LEN(cmd);
@@ -309,32 +309,32 @@ begin
     return false;
 end;
 
-proc nfields(s: ^Spec; l: INT): INT;
+proc nfields(const s: Spec; l: INT): INT;
 begin
-    return INT(s^.lines[l].n);
+    return INT(s.lines[l].n);
 end;
 
 (* Field k of line l, "" past its end. *)
-proc fld(s: ^Spec; l, k: INT): []U8;
+proc fld(const s: Spec; l, k: INT): []U8;
 begin
     if k >= nfields(s, l) then return ""; end;
-    return Ccore.bytes(Ccore.items(s^.lines[l])[k]);
+    return Ccore.bytes(Ccore.items(s.lines[l])[k]);
 end;
 
-proc fldIs(s: ^Spec; l, k: INT; q: []U8): BOOL;
+proc fldIs(const s: Spec; l, k: INT; q: []U8): BOOL;
 begin
     return (k < nfields(s, l)) and (fld(s, l, k) = q);
 end;
 
 (* Is line l a kw line of the scope, with at least nf fields? *)
-proc scoped(s: ^Spec; l: INT; kw: []U8; nf: INT): BOOL;
+proc scoped(const s: Spec; l: INT; kw: []U8; nf: INT): BOOL;
 begin
-    return (nfields(s, l) >= nf) and (fld(s, l, 0) = kw) and fldIs(s, l, 1, s^.scope);
+    return (nfields(s, l) >= nf) and (fld(s, l, 0) = kw) and fldIs(s, l, 1, s.scope);
 end;
 
 (* Is line l a well-formed opt line of the scope: a letter or -, and a
    name without dashes or -? *)
-proc isOpt(s: ^Spec; l: INT): BOOL;
+proc isOpt(const s: Spec; l: INT): BOOL;
 var o: []U8;
 begin
     if not scoped(s, l, "opt", 4) or (LEN(fld(s, l, 2)) # 1) then return false; end;
@@ -343,39 +343,39 @@ begin
 end;
 
 (* The name q added to ans, led by the first skip bytes of p. *)
-proc offer1(ans: ^Vals.Vec; p: []U8; skip: INT; q: []U8);
+proc offer1(var ans: Vals.Vec; p: []U8; skip: INT; q: []U8);
 var b: Buf.Buf;
 begin
     Buf.init(b, Ccore.temps);
     Buf.str(b, p[0..skip]);
     Buf.str(b, q);
-    Vals.push(ans^, Ccore.bufVal(ADR(b)));
+    Vals.push(ans, Ccore.bufVal(b));
 end;
 
 (* The scope's option with the letter c; -1 if none. *)
-proc short(s: ^Spec; c: U8): INT;
+proc short(const s: Spec; c: U8): INT;
 var l: INT;
 begin
-    for l := 1 to LEN(s^.lines) - 1 do
+    for l := 1 to LEN(s.lines) - 1 do
         if isOpt(s, l) and (fld(s, l, 2)[0] = c) and (c # '-') then return l; end;
     end;
     return -1;
 end;
 
 (* The scope's option with the long name q; -1 if none. *)
-proc long(s: ^Spec; q: []U8): INT;
+proc long(const s: Spec; q: []U8): INT;
 var l: INT;
 begin
-    for l := 1 to LEN(s^.lines) - 1 do
+    for l := 1 to LEN(s.lines) - 1 do
         if isOpt(s, l) and fldIs(s, l, 3, q) and (q # "-") then return l; end;
     end;
     return -1;
 end;
 
-proc isSub(s: ^Spec; v: []U8): BOOL;
+proc isSub(const s: Spec; v: []U8): BOOL;
 var l, k: INT;
 begin
-    for l := 1 to LEN(s^.lines) - 1 do
+    for l := 1 to LEN(s.lines) - 1 do
         if scoped(s, l, "sub", 3) then
             for k := 2 to nfields(s, l) - 1 do
                 if fldIs(s, l, k, v) then return true; end;
@@ -386,10 +386,10 @@ begin
 end;
 
 (* The arg line for the scope's mth operand; -1 if none. *)
-proc operand(s: ^Spec; m: INT): INT;
+proc operand(const s: Spec; m: INT): INT;
 var f: []U8; l, k, x: INT;
 begin
-    for l := 1 to LEN(s^.lines) - 1 do
+    for l := 1 to LEN(s.lines) - 1 do
         if scoped(s, l, "arg", 4) then
             f := fld(s, l, 2);
             x := 0;
@@ -413,7 +413,7 @@ end;
    $NAME, braced or not, taken from the environment; nothing if one of
    them is unset. They go into ans as offer1 puts them, those starting
    with a dot only if p does after its first skip bytes. *)
-proc dirNames(s: ^Spec; l, k: INT; ans: ^Vals.Vec; p: []U8; skip: INT);
+proc dirNames(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []U8; skip: INT);
 var dd: Sys.Dir; d: Buf.Buf; f, v, nm: []U8; i, j: INT; dot, ok: BOOL;
 begin
     if k >= nfields(s, l) then return; end;
@@ -459,7 +459,7 @@ begin
 end;
 
 (* The kind line l gives from field k on; one and in add to ans. *)
-proc argKind(s: ^Spec; l, k: INT; ans: ^Vals.Vec; p: []U8; skip: INT): Kind;
+proc argKind(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []U8; skip: INT): Kind;
 var i: INT;
 begin
     if fldIs(s, l, k, "dir") then return kDir; end;
@@ -481,7 +481,7 @@ end;
    of p (an option's --name=), and the kind says what else. For
    kCommand, at is where in words the command line of its own starts,
    LEN(words) if at p. *)
-proc specSays(lines: []Ccore.Val; words: []Ccore.Val; p: []U8; ans: ^Vals.Vec): (Kind, INT, INT);
+proc specSays(lines: []Ccore.Val; words: []Ccore.Val; p: []U8; var ans: Vals.Vec): (Kind, INT, INT);
 var s: Spec; b: Buf.Buf; w: []U8; count, pend, i, j, li, skip: INT; dashes: BOOL;
 begin
     s := {lines: lines, scope: "-"};
@@ -490,24 +490,24 @@ begin
     for i := 1 to LEN(words) - 1 do
         w := Ccore.bytes(Ccore.toStr(words[i]));
         if pend >= 0 then
-            if fldIs(ADR(s), pend, 4, "command") then return kCommand, i, 0; end;
+            if fldIs(s, pend, 4, "command") then return kCommand, i, 0; end;
             pend := -1;
         elsif not dashes and (w = "--") then
             dashes := true;
         elsif not dashes and (LEN(w) > 1) and (w[0] = '-') then
             if w[1] = '-' then
-                li := long(ADR(s), w[2..LEN(w)]);
-                if (Str.find(w, "=") < 0) and (li >= 0) and (nfields(ADR(s), li) > 4) then pend := li; end;
+                li := long(s, w[2..LEN(w)]);
+                if (Str.find(w, "=") < 0) and (li >= 0) and (nfields(s, li) > 4) then pend := li; end;
             else
                 for j := 1 to LEN(w) - 1 do
-                    li := short(ADR(s), w[j]);
-                    if (li >= 0) and (nfields(ADR(s), li) > 4) then
+                    li := short(s, w[j]);
+                    if (li >= 0) and (nfields(s, li) > 4) then
                         if j = LEN(w) - 1 then pend := li; end;    (* else the rest is its value *)
                         break;
                     end;
                 end;
             end;
-        elsif not dashes and (count = 0) and isSub(ADR(s), w) then
+        elsif not dashes and (count = 0) and isSub(s, w) then
             if s.scope = "-" then
                 s.scope := w;
             else
@@ -519,28 +519,28 @@ begin
             end;
         else
             INC(count);
-            li := operand(ADR(s), count);
-            if (li >= 0) and fldIs(ADR(s), li, 3, "command") then return kCommand, i, 0; end;
+            li := operand(s, count);
+            if (li >= 0) and fldIs(s, li, 3, "command") then return kCommand, i, 0; end;
         end;
     end;
     (* the word itself *)
-    if pend >= 0 then return argKind(ADR(s), pend, 4, ans, p, 0), LEN(words), 0; end;
+    if pend >= 0 then return argKind(s, pend, 4, ans, p, 0), LEN(words), 0; end;
     if not dashes and (LEN(p) > 2) and (p[0..2] = "--") then
         j := 2;
         while (j < LEN(p)) and (p[j] # '=') do INC(j); end;
         if j < LEN(p) then
             skip := j + 1;
-            li := long(ADR(s), p[2..j]);
-            if (li >= 0) and (nfields(ADR(s), li) > 4) then return argKind(ADR(s), li, 4, ans, p, skip), LEN(words), skip; end;
+            li := long(s, p[2..j]);
+            if (li >= 0) and (nfields(s, li) > 4) then return argKind(s, li, 4, ans, p, skip), LEN(words), skip; end;
             return kNone, LEN(words), skip;
         end;
     end;
     if not dashes and (LEN(p) > 0) and (p[0] = '-') then
         for li := 1 to LEN(lines) - 1 do
-            if isOpt(ADR(s), li) then
-                w := fld(ADR(s), li, 3);
+            if isOpt(s, li) then
+                w := fld(s, li, 3);
                 if w # "-" then offer1(ans, "--", 2, w); end;
-                w := fld(ADR(s), li, 2);
+                w := fld(s, li, 2);
                 if w[0] # '-' then offer1(ans, "-", 1, w); end;
             end;
         end;
@@ -548,29 +548,29 @@ begin
     end;
     if not dashes and (count = 0) then
         for li := 1 to LEN(lines) - 1 do
-            if scoped(ADR(s), li, "sub", 3) then
-                for j := 2 to nfields(ADR(s), li) - 1 do Vals.push(ans^, Ccore.items(lines[li])[j]); end;
+            if scoped(s, li, "sub", 3) then
+                for j := 2 to nfields(s, li) - 1 do Vals.push(ans, Ccore.items(lines[li])[j]); end;
             end;
         end;
     end;
-    li := operand(ADR(s), count + 1);
+    li := operand(s, count + 1);
     if li < 0 then return kFile, LEN(words), 0; end;
-    return argKind(ADR(s), li, 3, ans, p, 0), LEN(words), 0;
+    return argKind(s, li, 3, ans, p, 0), LEN(words), 0;
 end;
 
 (* -------------------------------------------------------- completion *)
 
 (* q added to out if it fits p as how says. *)
-proc offer(q, p: []U8; how: How; out: ^Vals.Vec);
+proc offer(q, p: []U8; how: How; var out: Vals.Vec);
 begin
-    if fits(q, p, how) then Vals.push(out^, Ccore.strVal(q)); end;
+    if fits(q, p, how) then Vals.push(out, Ccore.strVal(q)); end;
 end;
 
 (* What p might become in the context cx, added to out: the answers in
    ans first, then, unless a complete function gave them or the kind is
    kNone, the names that fit as how says. How many bytes of p the names
    leave out. *)
-proc gather(p: []U8; cx: Cedit.Context; how: How; kind: Kind; given: BOOL; ans: []Ccore.Val; out: ^Vals.Vec): INT;
+proc gather(p: []U8; cx: Cedit.Context; how: How; kind: Kind; given: BOOL; ans: []Ccore.Val; var out: Vals.Vec): INT;
 var b: Buf.Buf; names, homes: Names.Vec; g: []Cvars.Var; procs: []^Csyntax.Stmt; nm: [][]U8; i, s: INT; show: Show;
 begin
     (* a complete function's words stand alone; a file's may not *)
@@ -597,7 +597,7 @@ begin
         (* ~user: the users, as ~user/ *)
         Names.init(names, Ccore.temps);
         Names.init(homes, Ccore.temps);
-        Cvars.passwd(ADR(names), ADR(homes));
+        Cvars.passwd(names, homes);
         nm := Names.all(names);
         for i := 0 to LEN(nm) - 1 do
             if fits(nm[i], p[1..LEN(p)], how) then
@@ -605,7 +605,7 @@ begin
                 Buf.add(b, '~');
                 Buf.str(b, nm[i]);
                 Buf.add(b, '/');
-                Vals.push(out^, Ccore.bufVal(ADR(b)));
+                Vals.push(out, Ccore.bufVal(b));
             end;
         end;
         return 1;
@@ -620,7 +620,7 @@ begin
     Buf.init(b, Ccore.temps);
     if s = 0 then
         Buf.add(b, '.');
-    elsif (p[0] # '~') or not Cvars.tilde(p[0..s], ADR(b)) then
+    elsif (p[0] # '~') or not Cvars.tilde(p[0..s], b) then
         Buf.str(b, p[0..s]);
     end;
     match cx of
@@ -635,15 +635,15 @@ end;
 (* What the unquoted word p might become in the context cx, after the
    command's words, added to out; ask is the user's complete function.
    True if out is ranked, best first, for nothing started with p. *)
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec; ask: Asker): BOOL;
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec; ask: Asker): BOOL;
 var ans, lines: Vals.Vec; b: Buf.Buf; a: []Ccore.Val; kind: Kind; off, at, skip, i: INT; given, r: BOOL;
 begin
     Vals.init(ans, Ccore.temps);
     kind := kUsual;
-    if LEN(words) > 0 then ask(p, words, ADR(ans)); end;
+    if LEN(words) > 0 then ask(p, words, ans); end;
     given := ans.len > 0;
-    if (LEN(words) > 0) and not given and specFind(Ccore.bytes(Ccore.toStr(words[0])), ADR(lines)) then
-        kind, at, skip := specSays(Vals.all(lines), words, p, ADR(ans));
+    if (LEN(words) > 0) and not given and specFind(Ccore.bytes(Ccore.toStr(words[0])), lines) then
+        kind, at, skip := specSays(Vals.all(lines), words, p, ans);
         match kind of
         | kFile: cx := Cedit.cxArg;
         | kDir: cx := Cedit.cxDir;
@@ -665,19 +665,19 @@ begin
                 r := complete(p[skip..LEN(p)], cx, [], out, ask);
             end;
             if skip > 0 then
-                a := Vals.all(out^);
+                a := Vals.all(out);
                 for i := 0 to LEN(a) - 1 do
                     Buf.init(b, Ccore.temps);
                     Buf.str(b, p[0..skip]);
                     Buf.str(b, Ccore.bytes(a[i]));
-                    a[i] := Ccore.bufVal(ADR(b));
+                    a[i] := Ccore.bufVal(b);
                 end;
             end;
             return r;
         end;
     end;
     off := gather(p, cx, prefix, kind, given, Vals.all(ans), out);
-    if (out^.len > 0) or (LEN(p) = off) then return false; end;
+    if (out.len > 0) or (LEN(p) = off) then return false; end;
     off := gather(p, cx, fuzzy, kind, given, Vals.all(ans), out);
     rank(out, off, p[off..LEN(p)]);
     return true;

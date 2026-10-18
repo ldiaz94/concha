@@ -55,10 +55,10 @@ var
 (* -------------------------------------------------------- variables *)
 
 (* The newest variable called name in t, from index lo on; nil if none. *)
-proc look(t: ^Vars.Vec; lo: INT; name: []U8): ^Var;
+proc look(var t: Vars.Vec; lo: INT; name: []U8): ^Var;
 var a: []Var; i: INT;
 begin
-    a := Vars.all(t^);
+    a := Vars.all(t);
     for i := LEN(a) - 1 to lo by -1 do
         if a[i].name = name then return ADR(a[i]); end;
     end;
@@ -66,10 +66,10 @@ begin
 end;
 
 (* A new variable called name in t, nil; good until t next grows. *)
-proc add(t: ^Vars.Vec; name: []U8): ^Var;
+proc add(var t: Vars.Vec; name: []U8): ^Var;
 var r: ^Var;
 begin
-    r := Vars.add(t^);
+    r := Vars.add(t);
     r^.name := name;
     return r;
 end;
@@ -80,16 +80,16 @@ proc find*(name: []U8): ^Var;
 var r: ^Var;
 begin
     if depth > 0 then
-        r := look(ADR(locals), base, name);
+        r := look(locals, base, name);
         if r # nil then return r; end;
     end;
-    return look(ADR(globals), 0, name);
+    return look(globals, 0, name);
 end;
 
 (* The global called name; nil if none. *)
 proc findGlobal*(name: []U8): ^Var;
 begin
-    return look(ADR(globals), 0, name);
+    return look(globals, 0, name);
 end;
 
 (* The global called name, made nil if there is none. name is kept as
@@ -97,8 +97,8 @@ end;
 proc global*(name: []U8): ^Var;
 var r: ^Var;
 begin
-    r := look(ADR(globals), 0, name);
-    if r = nil then r := add(ADR(globals), name); end;
+    r := look(globals, 0, name);
+    if r = nil then r := add(globals, name); end;
     return r;
 end;
 
@@ -106,7 +106,7 @@ end;
    environment may have two. *)
 proc newGlobal*(name: []U8): ^Var;
 begin
-    return add(ADR(globals), name);
+    return add(globals, name);
 end;
 
 (* Every global, oldest first, until one is made or unset. *)
@@ -133,7 +133,7 @@ var r: ^Var;
 begin
     r := find(name);
     if r = nil then
-        if depth > 0 then r := add(ADR(locals), name); else r := add(ADR(globals), name); end;
+        if depth > 0 then r := add(locals, name); else r := add(globals, name); end;
     end;
     return store(r, v);
 end;
@@ -144,8 +144,8 @@ proc declare*(name: []U8; v: Ccore.Val): ERROR;
 var r: ^Var;
 begin
     if depth > 0 then
-        r := look(ADR(locals), base, name);
-        if r = nil then r := add(ADR(locals), name); end;
+        r := look(locals, base, name);
+        if r = nil then r := add(locals, name); end;
     else
         r := global(name);
     end;
@@ -153,14 +153,14 @@ begin
 end;
 
 (* r taken out of t, its value given back. *)
-proc remove(t: ^Vars.Vec; r: ^Var);
+proc remove(var t: Vars.Vec; r: ^Var);
 var a: []Var; i: INT;
 begin
-    a := Vars.all(t^);
+    a := Vars.all(t);
     i := r - ADR(a[0]);
     Ccore.drop(r^.v);
     COPY(a[i..LEN(a) - 1], a[i + 1..LEN(a)]);
-    Vars.resize(t^, LEN(a) - 1);
+    Vars.resize(t, LEN(a) - 1);
 end;
 
 (* unset name: a local of the frame on top, else a global; nothing if
@@ -169,16 +169,16 @@ proc unset*(name: []U8): ERROR;
 var r: ^Var;
 begin
     if depth > 0 then
-        r := look(ADR(locals), base, name);
+        r := look(locals, base, name);
         if r # nil then
-            remove(ADR(locals), r);
+            remove(locals, r);
             return nil;
         end;
     end;
-    r := look(ADR(globals), 0, name);
+    r := look(globals, 0, name);
     if r = nil then return nil; end;
     if r^.readOnly then return Ccore.failOn(name, "read-only variable"); end;
-    remove(ADR(globals), r);
+    remove(globals, r);
     return nil;
 end;
 
@@ -242,13 +242,13 @@ end;
 (* A new variable of the frame on top, nil; good until the next is made. *)
 proc local*(name: []U8): ^Var;
 begin
-    return add(ADR(locals), name);
+    return add(locals, name);
 end;
 
 (* The local name of the frame on top; nil if none. *)
 proc findLocal*(name: []U8): ^Var;
 begin
-    return look(ADR(locals), base, name);
+    return look(locals, base, name);
 end;
 
 (* The stack as it stood at f, the variables made since given back; the
@@ -296,36 +296,36 @@ end;
 
 (* ------------------------------------------------- "did you mean" *)
 
-proc bestInit*(b: ^Best);
+proc bestInit*(var b: Best);
 begin
-    b^ := {dist: 3FFFFFFFH};
+    b := {dist: 3FFFFFFFH};
 end;
 
 (* name, as a candidate for the target. *)
-proc consider*(b: ^Best; name, target: []U8);
+proc consider*(var b: Best; name, target: []U8);
 var d: INT;
 begin
     d := Ccore.distance(target, name);
-    if d < b^.dist then
-        b^ := {dist: d, ties: 1, name: name};
-    elsif (d = b^.dist) and (name # b^.name) then
-        INC(b^.ties);
+    if d < b.dist then
+        b := {dist: d, ties: 1, name: name};
+    elsif (d = b.dist) and (name # b.name) then
+        INC(b.ties);
     end;
 end;
 
 (* The one candidate closest to the target, which was n bytes long; ""
    if none is close enough, or two are as close. *)
-proc bestName*(b: ^Best; n: INT): []U8;
+proc bestName*(const b: Best; n: INT): []U8;
 var lim: INT;
 begin
     lim := 2;
     if n <= 4 then lim := 1; end;
-    if (b^.ties = 1) and (b^.dist <= lim) then return b^.name; end;
+    if (b.ties = 1) and (b.dist <= lim) then return b.name; end;
     return "";
 end;
 
 (* msg about name, with the closest of b if there is one. *)
-proc failMeaning(msg, name: []U8; b: ^Best): ERROR;
+proc failMeaning(msg, name: []U8; const b: Best): ERROR;
 var s: []U8;
 begin
     s := bestName(b, LEN(name));
@@ -336,24 +336,24 @@ end;
 proc unknownRoutine*(name: []U8): ERROR;
 var b: Best; a: []^Csyntax.Stmt; i: INT;
 begin
-    bestInit(ADR(b));
-    for i := 0 to LEN(Csyntax.Builtins) - 1 do consider(ADR(b), Csyntax.Builtins[i].name, name); end;
+    bestInit(b);
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do consider(b, Csyntax.Builtins[i].name, name); end;
     a := Procs.all(procs);
-    for i := 0 to LEN(a) - 1 do consider(ADR(b), a[i]^.s, name); end;
-    return failMeaning("unknown routine", name, ADR(b));
+    for i := 0 to LEN(a) - 1 do consider(b, a[i]^.s, name); end;
+    return failMeaning("unknown routine", name, b);
 end;
 
 proc undefined*(name: []U8): ERROR;
 var b: Best; a: []Var; i: INT;
 begin
-    bestInit(ADR(b));
+    bestInit(b);
     if depth > 0 then
         a := Vars.all(locals);
-        for i := LEN(a) - 1 to base by -1 do consider(ADR(b), a[i].name, name); end;
+        for i := LEN(a) - 1 to base by -1 do consider(b, a[i].name, name); end;
     end;
     a := Vars.all(globals);
-    for i := LEN(a) - 1 to 0 by -1 do consider(ADR(b), a[i].name, name); end;
-    return failMeaning("undefined variable", name, ADR(b));
+    for i := LEN(a) - 1 to 0 by -1 do consider(b, a[i].name, name); end;
+    return failMeaning("undefined variable", name, b);
 end;
 
 (* --------------------------------------------------- homes and PATH *)
@@ -364,11 +364,11 @@ begin
 end;
 
 (* The users in /etc/passwd, and their home directories, in the arena. *)
-proc passwd*(names, homes: ^Names.Vec);
+proc passwd*(var names, homes: Names.Vec);
 var b: Buf.Buf; s, l: []U8; at: [7]INT; i, f: INT; more: BOOL;
 begin
     Buf.init(b, Ccore.temps);
-    if Ccore.readFile("/etc/passwd", ADR(b)) < 0 then return; end;
+    if Ccore.readFile("/etc/passwd", b) < 0 then return; end;
     s := Buf.bytes(b);
     more := true;
     while more do
@@ -381,8 +381,8 @@ begin
             end;
         end;
         if f = 6 then
-            Names.push(names^, l[0..at[1] - 1]);
-            Names.push(homes^, l[at[5]..at[6] - 1]);
+            Names.push(names, l[0..at[1] - 1]);
+            Names.push(homes, l[at[5]..at[6] - 1]);
         end;
     end;
 end;
@@ -394,7 +394,7 @@ var names, homes: Names.Vec; a: [][]U8; i: INT;
 begin
     Names.init(names, Ccore.temps);
     Names.init(homes, Ccore.temps);
-    passwd(ADR(names), ADR(homes));
+    passwd(names, homes);
     a := Names.all(names);
     for i := 0 to LEN(a) - 1 do
         if a[i] = name then return Names.all(homes)[i], true; end;
@@ -404,7 +404,7 @@ end;
 
 (* p, which starts with ~ or ~user, added to b with that part made the
    home directory; false if there is no such user. *)
-proc tilde*(p: []U8; b: ^Buf.Buf): BOOL;
+proc tilde*(p: []U8; var b: Buf.Buf): BOOL;
 var h: []U8; k: INT; ok: BOOL;
 begin
     k := 1;
@@ -415,8 +415,8 @@ begin
         h, ok := userHome(p[1..k]);
         if not ok then return false; end;
     end;
-    Buf.str(b^, h);
-    Buf.str(b^, p[k..LEN(p)]);
+    Buf.str(b, h);
+    Buf.str(b, p[k..LEN(p)]);
     return true;
 end;
 
@@ -441,7 +441,7 @@ begin
         k := 0;
         while (k < LEN(e)) and (e[k] # '=') do INC(k); end;
         if (k < LEN(e)) and (k > 0) then
-            r := add(ADR(globals), Ccore.perm(e[0..k]));
+            r := add(globals, Ccore.perm(e[0..k]));
             r^.v := Ccore.keep(Ccore.strVal(e[k + 1..LEN(e)]));
             r^.exported := true;
         end;

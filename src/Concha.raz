@@ -56,7 +56,7 @@ proc load(path: []U8; bad: INT): []U8;
 var b: Buf.Buf; e: INT;
 begin
     Buf.init(b, Heap.heap);
-    e := Ccore.readFile(path, ADR(b));
+    e := Ccore.readFile(path, b);
     if e < 0 then
         Ccore.errHead;
         Ccore.put(2, Ccore.text("cannot read {}: {}\n", [Fmt.str(path), Fmt.str(Ccore.errText(-e))]));
@@ -363,7 +363,7 @@ proc runRc;
 var b: Buf.Buf;
 begin
     Buf.init(b, Heap.heap);
-    if Ccore.readFile(homeFile(".concharc"), ADR(b)) < 0 then return; end;
+    if Ccore.readFile(homeFile(".concharc"), b) < 0 then return; end;
     _ := Cinterp.runText(Buf.bytes(b), ".concharc");
     Cinterp.recover;
     Ccore.release(top);
@@ -576,7 +576,7 @@ begin
         repl;
     end;
     Buf.reset(line);
-    if Ccore.readFile("/dev/stdin", ADR(line)) < 0 then Sys.exit(1); end;
+    if Ccore.readFile("/dev/stdin", line) < 0 then Sys.exit(1); end;
     Cinterp.onSignals;
     script(Buf.bytes(line), "");
 end;

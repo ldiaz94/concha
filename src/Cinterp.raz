@@ -137,7 +137,7 @@ proc runArgs(a: []Ccore.Val): (INT, ERROR); forward;
 proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
 proc runText*(text, path: []U8): ERROR; forward;
 proc reapJobs*; forward;
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec): BOOL; forward;
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL; forward;
 proc correct(a: []Ccore.Val); forward;
 
 (* ---------------------------------------------------------- signals *)
@@ -638,13 +638,13 @@ begin
 end;
 
 (* A job's name: its words. *)
-proc argsName(a: []Ccore.Val; b: ^Buf.Buf);
+proc argsName(a: []Ccore.Val; var b: Buf.Buf);
 var i: INT;
 begin
-    if LEN(a) = 0 then Buf.str(b^, "..."); end;
+    if LEN(a) = 0 then Buf.str(b, "..."); end;
     for i := 0 to LEN(a) - 1 do
-        if i > 0 then Buf.add(b^, ' '); end;
-        Buf.str(b^, Ccore.bytes(Ccore.toStr(a[i])));
+        if i > 0 then Buf.add(b, ' '); end;
+        Buf.str(b, Ccore.bytes(Ccore.toStr(a[i])));
     end;
 end;
 
@@ -657,7 +657,7 @@ begin
     if pg = 0 then pg := pid; end;
     joinGroup(pid, pg, true);
     Buf.init(b, Ccore.temps);
-    argsName(a, ADR(b));
+    argsName(a, b);
     pids[0] := pid;
     return foreground(pids, pg, Buf.bytes(b));
 end;
@@ -692,7 +692,7 @@ end;
 (* For tryExec: the file f run with the arguments av, its name first,
    and the environment ev; a file the kernel can't run (ENOEXEC) is a
    script for /bin/sh. err is why it failed, unless f wasn't there. *)
-proc attempt(f: []U8; av, ev: [][]U8; err: ^INT);
+proc attempt(f: []U8; av, ev: [][]U8; var err: INT);
 var sh: Names.Vec; e, k: INT;
 begin
     e := -Sys.execve(f, av, ev);
@@ -703,7 +703,7 @@ begin
         for k := 1 to LEN(av) - 1 do Names.push(sh, av[k]); end;
         _ := Sys.execve("/bin/sh", Names.all(sh), ev);
     end;
-    if e # Ccore.errNoEnt then err^ := e; end;
+    if e # Ccore.errNoEnt then err := e; end;
 end;
 
 (* Is c a byte of a variable's name? *)
@@ -725,7 +725,7 @@ begin
     slash := Str.find(name, "/") >= 0;
     err := Ccore.errNoEnt;
     if slash then
-        attempt(name, av, ev, ADR(err));
+        attempt(name, av, ev, err);
     elsif LEN(name) > 0 then
         path := Cvars.searchPath();
         more := true;
@@ -736,7 +736,7 @@ begin
             Buf.str(b, dir);
             Buf.add(b, '/');
             Buf.str(b, name);
-            attempt(Buf.bytes(b), av, ev, ADR(err));
+            attempt(Buf.bytes(b), av, ev, err);
         end;
     end;
     Ccore.errHead;
@@ -813,7 +813,7 @@ begin
     Sys.close(r);
     Cvars.setStatus(waitFor(pid));
     while (b.len > 0) and (Buf.bytes(b)[b.len - 1] = '\n') do DEC(b.len); end;
-    return Ccore.bufVal(ADR(b)), nil;
+    return Ccore.bufVal(b), nil;
 end;
 
 (* The number of the command builtin called v, from 1; 0 if none is. *)
@@ -922,7 +922,7 @@ begin
         Buf.init(b, Ccore.temps);    (* no such user *)
         Buf.add(b, '~');
         Buf.str(b, p^.s);
-        return Ccore.bufVal(ADR(b)), nil;
+        return Ccore.bufVal(b), nil;
     end;
 end;
 
@@ -931,21 +931,21 @@ var b: Buf.Buf; i: INT;
 begin
     Buf.init(b, Ccore.temps);
     for i := 0 to LEN(parts) - 1 do Buf.str(b, Ccore.bytes(Ccore.toStr(try partVal(ADR(parts[i]))))); end;
-    return Ccore.bufVal(ADR(b)), nil;
+    return Ccore.bufVal(b), nil;
 end;
 
 (* The word w expanded, its fields added to out: a lone $x, $(e),
    `list` or <(list) unquoted gives a list's items each as a field;
    anything else is one field, or the paths it matches as a pattern. *)
-proc expandWord(w: Csyntax.Word; out: ^Vals.Vec): ERROR;
+proc expandWord(w: Csyntax.Word; var out: Vals.Vec): ERROR;
 var v: Ccore.Val; plain, pat: Buf.Buf; s: []U8; i, k: INT; wild: BOOL;
 begin
     if (LEN(w) = 1) and not w[0].quoted and (w[0].kind >= Csyntax.ptVar) and (w[0].kind # Csyntax.ptHome) then
         v := try partVal(ADR(w[0]));
         if v.kind = Ccore.kList then
-            for i := 0 to INT(v.n) - 1 do Vals.push(out^, Ccore.items(v)[i]); end;
+            for i := 0 to INT(v.n) - 1 do Vals.push(out, Ccore.items(v)[i]); end;
         else
-            Vals.push(out^, v);
+            Vals.push(out, v);
         end;
         return nil;
     end;
@@ -968,7 +968,7 @@ begin
         end;
     end;
     if not wild then
-        Vals.push(out^, Ccore.bufVal(ADR(plain)));
+        Vals.push(out, Ccore.bufVal(plain));
     elsif Cglob.glob(Buf.bytes(pat), out) = 0 then
         return Ccore.failOn(Buf.bytes(plain), "no match");
     end;
@@ -990,7 +990,7 @@ begin
             rx[i].s := Buf.bytes(b);
         elsif rs[i].kind # Csyntax.rDup then
             Vals.init(v, Ccore.temps);
-            try expandWord(rs[i].target, ADR(v));
+            try expandWord(rs[i].target, v);
             if v.len # 1 then return [], Ccore.fail("ambiguous redirection"); end;
             rx[i].s := Ccore.bytes(Ccore.toStr(Vals.all(v)[0]));
         end;
@@ -999,14 +999,14 @@ begin
 end;
 
 (* The words and redirections of c, expanded into st. *)
-proc expand(c: ^Csyntax.Cmd; st: ^Stage): ERROR;
+proc expand(c: ^Csyntax.Cmd; var st: Stage): ERROR;
 var i: INT;
 begin
     Ccore.where^.line := c^.line;
     Ccore.where^.file := c^.path;
-    Vals.init(st^.args, Ccore.temps);
-    for i := 0 to LEN(c^.words) - 1 do try expandWord(c^.words[i], ADR(st^.args)); end;
-    st^.rx := try expandRedirs(c^.redirs);
+    Vals.init(st.args, Ccore.temps);
+    for i := 0 to LEN(c^.words) - 1 do try expandWord(c^.words[i], st.args); end;
+    st.rx := try expandRedirs(c^.redirs);
     return nil;
 end;
 
@@ -1170,7 +1170,7 @@ begin
     else
         Vals.push(out, b);
     end;
-    return Ccore.listVal(ADR(out));
+    return Ccore.listVal(out);
 end;
 
 (* Where sub starts in s, from 1; 0 if it doesn't. *)
@@ -1199,7 +1199,7 @@ begin
         Buf.init(buf, Ccore.temps);
         Buf.str(buf, Ccore.bytes(Ccore.toStr(a)));
         Buf.str(buf, Ccore.bytes(Ccore.toStr(b)));
-        return Ccore.bufVal(ADR(buf)), nil;
+        return Ccore.bufVal(buf), nil;
     | oSub:
         i := try Ccore.toInt(a);
         return Ccore.intVal(try Ccore.intSub(i, try Ccore.toInt(b))), nil;
@@ -1286,7 +1286,7 @@ begin
     | eList:
         Vals.init(out, Ccore.temps);
         for i := 0 to LEN(e^.args) - 1 do Vals.push(out, try eval(e^.args[i])); end;
-        return Ccore.listVal(ADR(out)), nil;
+        return Ccore.listVal(out), nil;
     | eInterp: return interpolate(e^.parts);
     | eCap: return capture(e^.cap);
     | eRange: return {}, nil;
@@ -1299,7 +1299,7 @@ proc source(path: []U8): ERROR;
 var b: Buf.Buf; e: INT;
 begin
     Buf.init(b, Ccore.temps);
-    e := Ccore.readFile(path, ADR(b));
+    e := Ccore.readFile(path, b);
     if e < 0 then return Ccore.failOn(path, Ccore.text("cannot read: {}", [Fmt.str(Ccore.errText(-e))])); end;
     try runText(Buf.bytes(b), Ccore.perm(path));
     if ctl = cExit then ctl := cNone; end;
@@ -1731,7 +1731,7 @@ begin
             Buf.add(b, c[0]);
         end;
     end;
-    return Ccore.bufVal(ADR(b)), got, nil;
+    return Ccore.bufVal(b), got, nil;
 end;
 
 proc isBlank(c: U8): BOOL;
@@ -1765,7 +1765,7 @@ begin
             s := s[j + LEN(sep)..LEN(s)];
         end;
     end;
-    return Ccore.listVal(ADR(out));
+    return Ccore.listVal(out);
 end;
 
 (* a sorted in place by compare, keeping equals in order: a merge sort,
@@ -1951,12 +1951,12 @@ begin
             if i > 0 then Buf.str(buf, b); end;
             Buf.str(buf, Ccore.bytes(Ccore.toStr(Ccore.items(v)[i])));
         end;
-        return Ccore.bufVal(ADR(buf)), nil;
+        return Ccore.bufVal(buf), nil;
     | bGlob:
         _ := try need(e, 1, 1);
         Vals.init(out, Ccore.temps);
-        _ := Cglob.glob(try argStr(e, 0), ADR(out));
-        return Ccore.listVal(ADR(out)), nil;
+        _ := Cglob.glob(try argStr(e, 0), out);
+        return Ccore.listVal(out), nil;
     | bExists:
         _ := try need(e, 1, 1);
         return Ccore.boolVal(Cglob.pathKind(try argStr(e, 0)) # Cglob.none), nil;
@@ -1998,7 +1998,7 @@ begin
             if g[i].exported then Vals.push(out, Ccore.strVal(g[i].name)); end;
         end;
         try sortVals(Vals.all(out));
-        return Ccore.listVal(ADR(out)), nil;
+        return Ccore.listVal(out), nil;
     | bGetenv:
         _ := try need(e, 1, 1);
         r := Cvars.findGlobal(try argStr(e, 0));
@@ -2035,7 +2035,7 @@ begin
         Vals.init(out, Ccore.temps);
         for i := 0 to INT(v.n) - 1 do Vals.push(out, Ccore.items(v)[i]); end;
         try sortVals(Vals.all(out));
-        return Ccore.listVal(ADR(out)), nil;
+        return Ccore.listVal(out), nil;
     | bReplace:
         _ := try need(e, 3, 3);
         a := try argStr(e, 0);
@@ -2044,7 +2044,7 @@ begin
         if LEN(b) = 0 then return {}, Ccore.failOn(e^.s, "nothing to replace"); end;
         Buf.init(buf, Ccore.temps);
         Str.replace(buf, a, b, c);
-        return Ccore.bufVal(ADR(buf)), nil;
+        return Ccore.bufVal(buf), nil;
     | bNone:
     end;
     return {}, nil;
@@ -2076,13 +2076,13 @@ begin
     return waitFg(pid, 0, a);
 end;
 
-proc isExternal(c: ^Csyntax.Cmd; st: ^Stage): BOOL;
+proc isExternal(c: ^Csyntax.Cmd; const st: Stage): BOOL;
 begin
-    return (c^.call = nil) and (c^.stmt = nil) and extWords(Vals.all(st^.args));
+    return (c^.call = nil) and (c^.stmt = nil) and extWords(Vals.all(st.args));
 end;
 
 (* The command c, expanded into st, run in this process: its status. *)
-proc inProc(c: ^Csyntax.Cmd; st: ^Stage): (INT, ERROR);
+proc inProc(c: ^Csyntax.Cmd; var st: Stage): (INT, ERROR);
 begin
     if c^.stmt # nil then
         try execStmt(c^.stmt);
@@ -2092,7 +2092,7 @@ begin
         _ := try eval(c^.call);
         return Cvars.status(), nil;
     end;
-    return runArgs(Vals.all(st^.args));
+    return runArgs(Vals.all(st.args));
 end;
 
 (* A pipeline of one command; tail if it may exec over the shell. *)
@@ -2100,8 +2100,8 @@ proc runSingle(c: ^Csyntax.Cmd; tail: BOOL): (INT, ERROR);
 var st: Stage; pid, lvl, r: INT; ok: BOOL; err: ERROR;
 begin
     if (c^.call = nil) and (c^.stmt = nil) then subSt := ADR(st); end;
-    try expand(c, ADR(st));
-    if isExternal(c, ADR(st)) then
+    try expand(c, st);
+    if isExternal(c, st) then
         if tail then
             ok := try redirect(st.rx, false);
             if not ok then Sys.exit(1); end;
@@ -2120,7 +2120,7 @@ begin
     lvl := nsave;
     r := 1;
     ok, err := redirect(st.rx, true);
-    if ok and (err = nil) then r, err := inProc(c, ADR(st)); end;
+    if ok and (err = nil) then r, err := inProc(c, st); end;
     if keepFds and (err = nil) then commitFds(lvl); else restoreFds(lvl); end;
     keepFds := false;
     return r, err;
@@ -2139,11 +2139,11 @@ begin
     Ints.init(pv, Ccore.temps);
     Ints.resize(pv, n);
     pids := Ints.all(pv);
-    for i := 0 to n - 1 do try expand(cmds[i], ADR(sts[i])); end;
+    for i := 0 to n - 1 do try expand(cmds[i], sts[i]); end;
     prev := -1;
     pg := subPg;    (* the job's group: a <(...)'s, or the first stage's *)
     for i := 0 to n - 1 do
-        if isExternal(cmds[i], ADR(sts[i])) then correct(Vals.all(sts[i].args)); end;
+        if isExternal(cmds[i], sts[i]) then correct(Vals.all(sts[i].args)); end;
         if i < n - 1 then
             r, w := Sys.pipe();
             if r < 0 then return 0, Ccore.fail("cannot make pipe"); end;
@@ -2162,8 +2162,8 @@ begin
             end;
             ok := try redirect(sts[i].rx, false);
             if not ok then Sys.exit(1); end;
-            if isExternal(cmds[i], ADR(sts[i])) then execExternal(Vals.all(sts[i].args)); end;
-            st, _ := inProc(cmds[i], ADR(sts[i]));
+            if isExternal(cmds[i], sts[i]) then execExternal(Vals.all(sts[i].args)); end;
+            st, _ := inProc(cmds[i], sts[i]);
             Sys.exit(st);
         end;
         joinGroup(pids[i], pg, true);
@@ -2178,7 +2178,7 @@ begin
         Buf.init(b, Ccore.temps);
         for i := 0 to n - 1 do
             if i > 0 then Buf.str(b, " | "); end;
-            argsName(Vals.all(sts[i].args), ADR(b));
+            argsName(Vals.all(sts[i].args), b);
         end;
         return foreground(pids, pg, Buf.bytes(b));
     end;
@@ -2236,32 +2236,32 @@ end;
 
 (* A background list's name: its words as written, for they are
    expanded only in the job. *)
-proc listName(pipes: []Csyntax.Pipe; b: ^Buf.Buf);
+proc listName(pipes: []Csyntax.Pipe; var b: Buf.Buf);
 var c: ^Csyntax.Cmd; i, j, k, m: INT;
 begin
     for i := 0 to LEN(pipes) - 1 do
         for j := 0 to LEN(pipes[i].cmds) - 1 do
             c := pipes[i].cmds[j];
-            if (LEN(c^.words) = 0) or (c^.call # nil) then Buf.str(b^, "..."); end;
+            if (LEN(c^.words) = 0) or (c^.call # nil) then Buf.str(b, "..."); end;
             for k := 0 to LEN(c^.words) - 1 do
                 for m := 0 to LEN(c^.words[k]) - 1 do
                     match c^.words[k][m].kind of
-                    | ptLit: Buf.str(b^, c^.words[k][m].s);
+                    | ptLit: Buf.str(b, c^.words[k][m].s);
                     | ptVar:
-                        Buf.add(b^, '$');
-                        Buf.str(b^, c^.words[k][m].s);
+                        Buf.add(b, '$');
+                        Buf.str(b, c^.words[k][m].s);
                     | ptHome:
-                        Buf.add(b^, '~');
-                        Buf.str(b^, c^.words[k][m].s);
-                    | else: Buf.str(b^, "...");
+                        Buf.add(b, '~');
+                        Buf.str(b, c^.words[k][m].s);
+                    | else: Buf.str(b, "...");
                     end;
                 end;
-                if k < LEN(c^.words) - 1 then Buf.add(b^, ' '); end;
+                if k < LEN(c^.words) - 1 then Buf.add(b, ' '); end;
             end;
-            if j < LEN(pipes[i].cmds) - 1 then Buf.str(b^, " | "); end;
+            if j < LEN(pipes[i].cmds) - 1 then Buf.str(b, " | "); end;
         end;
         if i < LEN(pipes) - 1 then
-            if pipes[i].join = Csyntax.jAnd then Buf.str(b^, " && "); else Buf.str(b^, " || "); end;
+            if pipes[i].join = Csyntax.jAnd then Buf.str(b, " && "); else Buf.str(b, " || "); end;
         end;
     end;
 end;
@@ -2300,7 +2300,7 @@ begin
     end;
     _ := Sys.setGroup(pid, pid);
     Buf.init(b, Ccore.temps);
-    listName(s^.pipes, ADR(b));
+    listName(s^.pipes, b);
     pids[0] := pid;
     k := newJob(pids, pid, Buf.bytes(b));
     if interactive then report(k, Ccore.text("{}", [Fmt.int(pid)])); end;
@@ -2569,7 +2569,7 @@ end;
    answers with a list of words or a string of lines, which go into
    ans. It runs with every standard fd on /dev/null, an error in it
    counts as no answer, and status is left as it was. *)
-proc ask(p: []U8; words: []Ccore.Val; ans: ^Vals.Vec);
+proc ask(p: []U8; words: []Ccore.Val; var ans: Vals.Vec);
 var
     def, up: ^Csyntax.Stmt; all: Vals.Vec; one: [1]Ccore.Val; r: Ccore.Val; f: Cvars.Frame; s: []U8;
     st, lvl, ns, ex, fd, i, j: INT; err: ERROR;
@@ -2579,7 +2579,7 @@ begin
     Vals.init(all, Ccore.temps);
     for i := 0 to LEN(words) - 1 do Vals.push(all, words[i]); end;
     Vals.push(all, Ccore.strVal(p));
-    one[0] := Ccore.listVal(ADR(all));
+    one[0] := Ccore.listVal(all);
     st := Cvars.status();
     lvl := nsave;
     ns := nsub;
@@ -2609,14 +2609,14 @@ begin
     restoreFds(lvl);
     Cvars.setStatus(st);
     if r.kind = Ccore.kList then
-        for i := 0 to INT(r.n) - 1 do Vals.push(ans^, Ccore.toStr(Ccore.items(r)[i])); end;
+        for i := 0 to INT(r.n) - 1 do Vals.push(ans, Ccore.toStr(Ccore.items(r)[i])); end;
     elsif r.kind = Ccore.kStr then
         s := Ccore.bytes(r);
         i := 0;
         while i < LEN(s) do
             j := i;
             while (j < LEN(s)) and (s[j] # '\n') do INC(j); end;
-            if j > i then Vals.push(ans^, Ccore.strVal(s[i..j])); end;
+            if j > i then Vals.push(ans, Ccore.strVal(s[i..j])); end;
             i := j + 1;
         end;
     end;
@@ -2625,7 +2625,7 @@ end;
 (* For the line editor's Tab: what the unquoted word p might become in
    the context cx, after the command's words, added to out; true if out
    is ranked. *)
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec): BOOL;
+proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL;
 begin
     return Ccomplete.complete(p, cx, words, out, ask);
 end;
@@ -2744,7 +2744,7 @@ begin
     m := Ccore.mark();
     Vals.init(out, Ccore.temps);
     for i := first to ARGC() - 1 do Vals.push(out, Ccore.strVal(Files.arg(i))); end;
-    _ := Cvars.store(Cvars.global("args"), Ccore.listVal(ADR(out)));
+    _ := Cvars.store(Cvars.global("args"), Ccore.listVal(out));
     Ccore.release(m);
 end;
 
