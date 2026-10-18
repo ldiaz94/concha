@@ -401,18 +401,18 @@ begin
     (* the last abbreviation ends among the characters *)
     if z[k + nk * 6 + nc - 1] # 0 then return false; end;
     (* the changes, each naming a clock there is, and in order *)
-    Times.init(ADR(trans), Heap.heap);
+    Times.init(trans, Heap.heap);
     for i := 0 to nt - 1 do
-        Times.push(ADR(trans), big(z, t + i * w, w));
+        Times.push(trans, big(z, t + i * w, w));
         if z[x + i] >= nk then return false; end;
     end;
-    zone.trans := Times.all(ADR(trans));
+    zone.trans := Times.all(trans);
     for i := 1 to nt - 1 do
         if zone.trans[i] <= zone.trans[i - 1] then return false; end;
     end;
-    Clocks.init(ADR(clocks), Heap.heap);
+    Clocks.init(clocks, Heap.heap);
     for i := 0 to nk - 1 do
-        c := Clocks.add(ADR(clocks));
+        c := Clocks.add(clocks);
         c^.off := INT(big(z, k + i * 6, 4));
         a := z[k + i * 6 + 5];
         (* -2^31 can't be negated, so the RFC refuses it; an
@@ -424,7 +424,7 @@ begin
         c^.abbr := short(z[a..e]);
     end;
     zone.idx := z[x..x + nt];
-    zone.clocks := Clocks.all(ADR(clocks));
+    zone.clocks := Clocks.all(clocks);
     return true;
 end;
 
@@ -450,9 +450,9 @@ end;
 proc readZone(path: []U8): BOOL;
 var z: []U8; e, e2: INT;
 begin
-    Buf.init(ADR(file), Heap.heap);
-    if Files.load(path, ADR(file)) # 0 then return false; end;
-    z := Buf.bytes(ADR(file));
+    Buf.init(file, Heap.heap);
+    if Files.load(path, file) # 0 then return false; end;
+    z := Buf.bytes(file);
     e := block(z, 0, 4);
     if e < 0 then return false; end;
     if z[4] < '2' then return take(z, 0, 4); end;
@@ -463,7 +463,7 @@ end;
 proc load;
 var path: []U8; b: Buf.Buf;
 begin
-    Buf.init(ADR(b), Heap.heap);
+    Buf.init(b, Heap.heap);
     path := Sys.env("TZ");
     if LEN(path) = 0 then
         path := "/etc/localtime";
@@ -471,12 +471,12 @@ begin
         path := path[1..LEN(path)];
     end;
     if (LEN(path) > 0) and (path[0] # '/') then
-        Buf.str(ADR(b), zoneDir);
-        Buf.str(ADR(b), path);
-        path := Buf.bytes(ADR(b));
+        Buf.str(b, zoneDir);
+        Buf.str(b, path);
+        path := Buf.bytes(b);
     end;
     if not readZone(path) then zone := {clocks: utc}; end;
-    Buf.done(ADR(b));
+    Buf.done(b);
     loaded := true;
 end;
 

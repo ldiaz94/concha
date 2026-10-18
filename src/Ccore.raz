@@ -190,9 +190,9 @@ end;
 (* The text of f with args, until the next call. *)
 proc text*(f: []U8; args: []Fmt.Arg): []U8;
 begin
-    Buf.reset(ADR(scratch));
-    Fmt.write(ADR(scratch), f, args);
-    return Buf.bytes(ADR(scratch));
+    Buf.reset(scratch);
+    Fmt.write(scratch, f, args);
+    return Buf.bytes(scratch);
 end;
 
 (* What strerror says, for the errors concha's callers meet; e is the
@@ -224,7 +224,7 @@ end;
 (* The message warn kept last, with keepErr. *)
 proc kept*: []U8;
 begin
-    return Buf.bytes(ADR(keptMsg));
+    return Buf.bytes(keptMsg);
 end;
 
 (* An error reported, and the work carried on: the head, the place,
@@ -233,9 +233,9 @@ proc report(what: []U8; hasWhat: BOOL; msg: []U8);
 var n: [20]U8; k: INT;
 begin
     if optsAt.keepErr then
-        Buf.reset(ADR(keptMsg));
-        if hasWhat then Buf.str(ADR(keptMsg), what); Buf.str(ADR(keptMsg), ": "); end;
-        Buf.str(ADR(keptMsg), msg);
+        Buf.reset(keptMsg);
+        if hasWhat then Buf.str(keptMsg, what); Buf.str(keptMsg, ": "); end;
+        Buf.str(keptMsg, msg);
         return;
     end;
     errHead;
@@ -308,7 +308,7 @@ end;
 proc listVal*(v: ^Vals.Vec): Val;
 var a: []Val;
 begin
-    a := Vals.all(v);
+    a := Vals.all(v^);
     if LEN(a) = 0 then return {kind: kList}; end;
     return {kind: kList, n: LEN(a), p: ^U8(ADR(a[0]))};
 end;
@@ -382,13 +382,13 @@ var s: []Val; i: INT;
 begin
     match v.kind of
     | kNil:
-    | kBool: if v.n # 0 then Buf.str(b, "true"); else Buf.str(b, "false"); end;
-    | kInt: Fmt.write(b, "{}", [Fmt.int(v.n)]);
-    | kStr: Buf.str(b, bytes(v));
+    | kBool: if v.n # 0 then Buf.str(b^, "true"); else Buf.str(b^, "false"); end;
+    | kInt: Fmt.write(b^, "{}", [Fmt.int(v.n)]);
+    | kStr: Buf.str(b^, bytes(v));
     | kList:
         s := items(v);
         for i := 0 to LEN(s) - 1 do
-            if i > 0 then Buf.add(b, ' '); end;
+            if i > 0 then Buf.add(b^, ' '); end;
             strInto(b, s[i]);
         end;
     end;
@@ -398,7 +398,7 @@ end;
 proc bufVal*(b: ^Buf.Buf): Val;
 var s: []U8;
 begin
-    s := Buf.bytes(b);
+    s := Buf.bytes(b^);
     if LEN(s) = 0 then return {kind: kStr}; end;
     return {kind: kStr, n: LEN(s), p: ADR(s[0])};
 end;
@@ -408,7 +408,7 @@ proc toStr*(v: Val): Val;
 var b: Buf.Buf;
 begin
     if v.kind = kStr then return v; end;
-    Buf.init(ADR(b), temps);
+    Buf.init(b, temps);
     strInto(ADR(b), v);
     return bufVal(ADR(b));
 end;
@@ -590,7 +590,7 @@ begin
     if fd < 0 then return fd; end;
     defer Sys.close(fd);
     while true do
-        s := Buf.spare(b, 10000H);
+        s := Buf.spare(b^, 10000H);
         k := Sys.read(fd, s);
         if k = 0 then break; end;
         if k > 0 then INC(b^.len, k);
@@ -606,6 +606,6 @@ begin
     optsAt.showLine := true;
     tempAlloc := {alloc: tempsAlloc, free: tempsFree};
     temps := ADR(tempAlloc);
-    Buf.init(ADR(scratch), Heap.heap);
-    Buf.init(ADR(keptMsg), Heap.heap);
+    Buf.init(scratch, Heap.heap);
+    Buf.init(keptMsg, Heap.heap);
 end Ccore.

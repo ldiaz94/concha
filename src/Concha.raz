@@ -55,14 +55,14 @@ end;
 proc load(path: []U8; bad: INT): []U8;
 var b: Buf.Buf; e: INT;
 begin
-    Buf.init(ADR(b), Heap.heap);
+    Buf.init(b, Heap.heap);
     e := Ccore.readFile(path, ADR(b));
     if e < 0 then
         Ccore.errHead;
         Ccore.put(2, Ccore.text("cannot read {}: {}\n", [Fmt.str(path), Fmt.str(Ccore.errText(-e))]));
         Sys.exit(bad);
     end;
-    return Buf.bytes(ADR(b));
+    return Buf.bytes(b);
 end;
 
 proc dumbTerm: BOOL;
@@ -362,9 +362,9 @@ end;
 proc runRc;
 var b: Buf.Buf;
 begin
-    Buf.init(ADR(b), Heap.heap);
+    Buf.init(b, Heap.heap);
     if Ccore.readFile(homeFile(".concharc"), ADR(b)) < 0 then return; end;
-    _ := Cinterp.runText(Buf.bytes(ADR(b)), ".concharc");
+    _ := Cinterp.runText(Buf.bytes(b), ".concharc");
     Cinterp.recover;
     Ccore.release(top);
 end;
@@ -401,7 +401,7 @@ begin
     if editing then
         g, s := Cedit.editLine(cont);
         Cinterp.noteSignals;
-        Buf.str(ADR(line), s);
+        Buf.str(line, s);
         return g;
     end;
     k := Sys.read(0, chunk);
@@ -412,7 +412,7 @@ begin
         return Cedit.gotCancel;
     end;
     if k = 0 then return Cedit.gotEof; end;
-    Buf.str(ADR(line), chunk[0..k]);
+    Buf.str(line, chunk[0..k]);
     return Cedit.gotLine;
 end;
 
@@ -429,7 +429,7 @@ end;
 (* The line ended, or dropped *)
 proc newLine;
 begin
-    Buf.reset(ADR(line));
+    Buf.reset(line);
     cont := false;
 end;
 
@@ -456,7 +456,7 @@ begin
         return false, nil;
     | gotLine:
     end;
-    text := Buf.bytes(ADR(line));
+    text := Buf.bytes(line);
     if text[LEN(text) - 1] # '\n' then
         cont := true;
         return false, nil;
@@ -543,7 +543,7 @@ begin
         Ccore.put(1, Usage);
         Sys.exit(0);
     end;
-    Buf.init(ADR(line), Heap.heap);
+    Buf.init(line, Heap.heap);
     top := Ccore.mark();
     Cinterp.initShell;
     setColour(Sys.isTerminal(2) and not dumbTerm() and not noColour());
@@ -575,10 +575,10 @@ begin
         runRc;
         repl;
     end;
-    Buf.reset(ADR(line));
+    Buf.reset(line);
     if Ccore.readFile("/dev/stdin", ADR(line)) < 0 then Sys.exit(1); end;
     Cinterp.onSignals;
-    script(Buf.bytes(ADR(line)), "");
+    script(Buf.bytes(line), "");
 end;
 
 end Concha.

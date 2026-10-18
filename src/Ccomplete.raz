@@ -72,10 +72,10 @@ end;
 proc rank(out: ^Vals.Vec; off: INT; p: []U8);
 var sv: Ints.Vec; a: []Ccore.Val; sc: []INT; v: Ccore.Val; i, j, k, t: INT; ex: BOOL;
 begin
-    a := Vals.all(out);
-    Ints.init(ADR(sv), Ccore.temps);
-    Ints.resize(ADR(sv), LEN(a));
-    sc := Ints.all(ADR(sv));
+    a := Vals.all(out^);
+    Ints.init(sv, Ccore.temps);
+    Ints.resize(sv, LEN(a));
+    sc := Ints.all(sv);
     ex := Cfuzzy.exact(p);
     for i := 0 to LEN(a) - 1 do
         if a[i].n > off then sc[i] := Cfuzzy.score(Ccore.bytes(a[i])[off..a[i].n], p, ex); end;
@@ -99,7 +99,7 @@ begin
             INC(k);
         end;
     end;
-    Vals.resize(out, k);
+    Vals.resize(out^, k);
 end;
 
 (* Is the file f a program this user may run? *)
@@ -113,28 +113,28 @@ end;
 proc listDir(from, pre, base: []U8; show: Show; how: How; out: ^Vals.Vec);
 var d: Sys.Dir; b: Buf.Buf; nm, full: []U8; k: Cglob.Kind; ok: BOOL;
 begin
-    if Sys.openDir(ADR(d), from) # 0 then return; end;
-    nm, ok := Sys.nextEntry(ADR(d));
+    if Sys.openDir(d, from) # 0 then return; end;
+    nm, ok := Sys.nextEntry(d);
     while ok do
         if ((nm[0] # '.') or (LEN(base) > 0) and (base[0] = '.')) and fits(nm, base, how) then
-            Buf.init(ADR(b), Ccore.temps);
-            Buf.str(ADR(b), from);
-            Buf.add(ADR(b), '/');
-            Buf.str(ADR(b), nm);
-            full := Buf.bytes(ADR(b));
+            Buf.init(b, Ccore.temps);
+            Buf.str(b, from);
+            Buf.add(b, '/');
+            Buf.str(b, nm);
+            full := Buf.bytes(b);
             k := Cglob.pathKind(full);
             if (show = all) or (show = dirs) and (k = Cglob.dir) or (show = programs) and runs(full)
                     or (show = runnable) and ((k = Cglob.dir) or (Sys.access(full, {Sys.executing}) = 0)) then
-                Buf.init(ADR(b), Ccore.temps);
-                Buf.str(ADR(b), pre);
-                Buf.str(ADR(b), nm);
-                if k = Cglob.dir then Buf.add(ADR(b), '/'); end;
-                Vals.push(out, Ccore.bufVal(ADR(b)));
+                Buf.init(b, Ccore.temps);
+                Buf.str(b, pre);
+                Buf.str(b, nm);
+                if k = Cglob.dir then Buf.add(b, '/'); end;
+                Vals.push(out^, Ccore.bufVal(ADR(b)));
             end;
         end;
-        nm, ok := Sys.nextEntry(ADR(d));
+        nm, ok := Sys.nextEntry(d);
     end;
-    Sys.closeDir(ADR(d));
+    Sys.closeDir(d);
 end;
 
 (* The programs along PATH whose names fit base, as how says, added to
@@ -161,9 +161,9 @@ begin
     for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do Cvars.consider(ADR(b), Csyntax.CmdBuiltins[i].name, name); end;
     p := Cvars.allProcs();
     for i := 0 to LEN(p) - 1 do Cvars.consider(ADR(b), p[i]^.s, name); end;
-    Vals.init(ADR(progs), Ccore.temps);
+    Vals.init(progs, Ccore.temps);
     alongPath("", prefix, ADR(progs));
-    v := Vals.all(ADR(progs));
+    v := Vals.all(progs);
     for i := 0 to LEN(v) - 1 do Cvars.consider(ADR(b), Ccore.bytes(v[i]), name); end;
     s := Cvars.bestName(ADR(b), LEN(name));
     if s = name then return ""; end;    (* a program listed may still fail, with a bad #! line *)
@@ -184,21 +184,21 @@ begin
     end;
     if Cvars.findProc(p) # nil then return true; end;
     m := Ccore.mark();
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if Str.find(p, "/") >= 0 then
-        if (p[0] # '~') or not Cvars.tilde(p, ADR(b)) then Buf.str(ADR(b), p); end;
-        known := runs(Buf.bytes(ADR(b)));
+        if (p[0] # '~') or not Cvars.tilde(p, ADR(b)) then Buf.str(b, p); end;
+        known := runs(Buf.bytes(b));
     else
         path := Cvars.searchPath();
         more := true;
         while more and not known do
             dir, path, more := Str.cut(path, ":");
             if LEN(dir) = 0 then dir := "."; end;
-            Buf.reset(ADR(b));
-            Buf.str(ADR(b), dir);
-            Buf.add(ADR(b), '/');
-            Buf.str(ADR(b), p);
-            known := runs(Buf.bytes(ADR(b)));
+            Buf.reset(b);
+            Buf.str(b, dir);
+            Buf.add(b, '/');
+            Buf.str(b, p);
+            known := runs(Buf.bytes(b));
         end;
     end;
     Ccore.release(m);
@@ -230,24 +230,24 @@ var f: Buf.Buf; fields: Vals.Vec; i: INT;
 begin
     i := 0;
     while i < LEN(t) do
-        Vals.init(ADR(fields), Ccore.temps);
+        Vals.init(fields, Ccore.temps);
         while (i < LEN(t)) and (t[i] # '\n') do
             if isBlank(t[i]) then
                 INC(i);
             elsif t[i] = '#' then
                 while (i < LEN(t)) and (t[i] # '\n') do INC(i); end;
             else
-                Buf.init(ADR(f), Ccore.temps);
+                Buf.init(f, Ccore.temps);
                 while (i < LEN(t)) and not isBlank(t[i]) and (t[i] # '\n') do
                     if (t[i] = '\\') and (i + 1 < LEN(t)) and (t[i + 1] # '\n') then INC(i); end;
-                    Buf.add(ADR(f), t[i]);
+                    Buf.add(f, t[i]);
                     INC(i);
                 end;
-                Vals.push(ADR(fields), Ccore.bufVal(ADR(f)));
+                Vals.push(fields, Ccore.bufVal(ADR(f)));
             end;
         end;
         INC(i);
-        Vals.push(lines, Ccore.listVal(ADR(fields)));
+        Vals.push(lines^, Ccore.listVal(ADR(fields)));
     end;
 end;
 
@@ -258,12 +258,12 @@ var info: Sys.Info; b: Buf.Buf; f: []Ccore.Val; err: INT;
 begin
     info, err := Sys.info(path);
     if (err # 0) or not info.file or (info.size > MaxSpec) then return false; end;
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if Ccore.readFile(path, ADR(b)) < 0 then return false; end;
-    Vals.init(lines, Ccore.temps);
-    specLines(Buf.bytes(ADR(b)), lines);
+    Vals.init(lines^, Ccore.temps);
+    specLines(Buf.bytes(b), lines);
     if lines^.len = 0 then return false; end;
-    f := Ccore.items(Vals.all(lines)[0]);
+    f := Ccore.items(Vals.all(lines^)[0]);
     return (LEN(f) >= 2) and (Ccore.bytes(f[0]) = "complete") and (Ccore.bytes(f[1]) = "1");
 end;
 
@@ -273,12 +273,12 @@ proc under(d: []U8; local: BOOL; name: []U8; lines: ^Vals.Vec): BOOL;
 var b: Buf.Buf;
 begin
     if (LEN(d) = 0) or (d[0] # '/') then return false; end;
-    Buf.init(ADR(b), Ccore.temps);
-    Buf.str(ADR(b), d);
-    if local then Buf.str(ADR(b), "/.local/share"); end;
-    Buf.str(ADR(b), "/concha/complete/");
-    Buf.str(ADR(b), name);
-    return specLoad(Buf.bytes(ADR(b)), lines);
+    Buf.init(b, Ccore.temps);
+    Buf.str(b, d);
+    if local then Buf.str(b, "/.local/share"); end;
+    Buf.str(b, "/concha/complete/");
+    Buf.str(b, name);
+    return specLoad(Buf.bytes(b), lines);
 end;
 
 (* The completion file for the command cmd, by its last component:
@@ -346,10 +346,10 @@ end;
 proc offer1(ans: ^Vals.Vec; p: []U8; skip: INT; q: []U8);
 var b: Buf.Buf;
 begin
-    Buf.init(ADR(b), Ccore.temps);
-    Buf.str(ADR(b), p[0..skip]);
-    Buf.str(ADR(b), q);
-    Vals.push(ans, Ccore.bufVal(ADR(b)));
+    Buf.init(b, Ccore.temps);
+    Buf.str(b, p[0..skip]);
+    Buf.str(b, q);
+    Vals.push(ans^, Ccore.bufVal(ADR(b)));
 end;
 
 (* The scope's option with the letter c; -1 if none. *)
@@ -418,12 +418,12 @@ var dd: Sys.Dir; d: Buf.Buf; f, v, nm: []U8; i, j: INT; dot, ok: BOOL;
 begin
     if k >= nfields(s, l) then return; end;
     f := fld(s, l, k);
-    Buf.init(ADR(d), Ccore.temps);
+    Buf.init(d, Ccore.temps);
     i := 0;
     if (LEN(f) > 0) and (f[0] = '~') and ((LEN(f) = 1) or (f[1] = '/')) then
         v := envVal("HOME");
         if LEN(v) = 0 then return; end;
-        Buf.str(ADR(d), v);
+        Buf.str(d, v);
         i := 1;
     end;
     while i < LEN(f) do
@@ -442,20 +442,20 @@ begin
                 i := j;
             end;
             if LEN(v) = 0 then return; end;
-            Buf.str(ADR(d), v);
+            Buf.str(d, v);
         else
-            Buf.add(ADR(d), f[i]);
+            Buf.add(d, f[i]);
             INC(i);
         end;
     end;
-    if Sys.openDir(ADR(dd), Buf.bytes(ADR(d))) # 0 then return; end;
+    if Sys.openDir(dd, Buf.bytes(d)) # 0 then return; end;
     dot := (LEN(p) > skip) and (p[skip] = '.');
-    nm, ok := Sys.nextEntry(ADR(dd));
+    nm, ok := Sys.nextEntry(dd);
     while ok do
         if (nm[0] # '.') or dot then offer1(ans, p, skip, nm); end;
-        nm, ok := Sys.nextEntry(ADR(dd));
+        nm, ok := Sys.nextEntry(dd);
     end;
-    Sys.closeDir(ADR(dd));
+    Sys.closeDir(dd);
 end;
 
 (* The kind line l gives from field k on; one and in add to ans. *)
@@ -511,11 +511,11 @@ begin
             if s.scope = "-" then
                 s.scope := w;
             else
-                Buf.init(ADR(b), Ccore.temps);
-                Buf.str(ADR(b), s.scope);
-                Buf.add(ADR(b), '.');
-                Buf.str(ADR(b), w);
-                s.scope := Buf.bytes(ADR(b));
+                Buf.init(b, Ccore.temps);
+                Buf.str(b, s.scope);
+                Buf.add(b, '.');
+                Buf.str(b, w);
+                s.scope := Buf.bytes(b);
             end;
         else
             INC(count);
@@ -549,7 +549,7 @@ begin
     if not dashes and (count = 0) then
         for li := 1 to LEN(lines) - 1 do
             if scoped(ADR(s), li, "sub", 3) then
-                for j := 2 to nfields(ADR(s), li) - 1 do Vals.push(ans, Ccore.items(lines[li])[j]); end;
+                for j := 2 to nfields(ADR(s), li) - 1 do Vals.push(ans^, Ccore.items(lines[li])[j]); end;
             end;
         end;
     end;
@@ -563,7 +563,7 @@ end;
 (* q added to out if it fits p as how says. *)
 proc offer(q, p: []U8; how: How; out: ^Vals.Vec);
 begin
-    if fits(q, p, how) then Vals.push(out, Ccore.strVal(q)); end;
+    if fits(q, p, how) then Vals.push(out^, Ccore.strVal(q)); end;
 end;
 
 (* What p might become in the context cx, added to out: the answers in
@@ -595,17 +595,17 @@ begin
     while (s > 0) and (p[s - 1] # '/') do DEC(s); end;
     if (s = 0) and (LEN(p) > 0) and (p[0] = '~') then
         (* ~user: the users, as ~user/ *)
-        Names.init(ADR(names), Ccore.temps);
-        Names.init(ADR(homes), Ccore.temps);
+        Names.init(names, Ccore.temps);
+        Names.init(homes, Ccore.temps);
         Cvars.passwd(ADR(names), ADR(homes));
-        nm := Names.all(ADR(names));
+        nm := Names.all(names);
         for i := 0 to LEN(nm) - 1 do
             if fits(nm[i], p[1..LEN(p)], how) then
-                Buf.init(ADR(b), Ccore.temps);
-                Buf.add(ADR(b), '~');
-                Buf.str(ADR(b), nm[i]);
-                Buf.add(ADR(b), '/');
-                Vals.push(out, Ccore.bufVal(ADR(b)));
+                Buf.init(b, Ccore.temps);
+                Buf.add(b, '~');
+                Buf.str(b, nm[i]);
+                Buf.add(b, '/');
+                Vals.push(out^, Ccore.bufVal(ADR(b)));
             end;
         end;
         return 1;
@@ -617,18 +617,18 @@ begin
         alongPath(p, how, out);
         return 0;
     end;
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if s = 0 then
-        Buf.add(ADR(b), '.');
+        Buf.add(b, '.');
     elsif (p[0] # '~') or not Cvars.tilde(p[0..s], ADR(b)) then
-        Buf.str(ADR(b), p[0..s]);
+        Buf.str(b, p[0..s]);
     end;
     match cx of
     | cxCommand: show := runnable;
     | cxDir: show := dirs;
     | else: show := all;
     end;
-    listDir(Buf.bytes(ADR(b)), p[0..s], p[s..LEN(p)], show, how, out);
+    listDir(Buf.bytes(b), p[0..s], p[s..LEN(p)], show, how, out);
     return s;
 end;
 
@@ -638,12 +638,12 @@ end;
 proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; out: ^Vals.Vec; ask: Asker): BOOL;
 var ans, lines: Vals.Vec; b: Buf.Buf; a: []Ccore.Val; kind: Kind; off, at, skip, i: INT; given, r: BOOL;
 begin
-    Vals.init(ADR(ans), Ccore.temps);
+    Vals.init(ans, Ccore.temps);
     kind := kUsual;
     if LEN(words) > 0 then ask(p, words, ADR(ans)); end;
     given := ans.len > 0;
     if (LEN(words) > 0) and not given and specFind(Ccore.bytes(Ccore.toStr(words[0])), ADR(lines)) then
-        kind, at, skip := specSays(Vals.all(ADR(lines)), words, p, ADR(ans));
+        kind, at, skip := specSays(Vals.all(lines), words, p, ADR(ans));
         match kind of
         | kFile: cx := Cedit.cxArg;
         | kDir: cx := Cedit.cxDir;
@@ -665,20 +665,20 @@ begin
                 r := complete(p[skip..LEN(p)], cx, [], out, ask);
             end;
             if skip > 0 then
-                a := Vals.all(out);
+                a := Vals.all(out^);
                 for i := 0 to LEN(a) - 1 do
-                    Buf.init(ADR(b), Ccore.temps);
-                    Buf.str(ADR(b), p[0..skip]);
-                    Buf.str(ADR(b), Ccore.bytes(a[i]));
+                    Buf.init(b, Ccore.temps);
+                    Buf.str(b, p[0..skip]);
+                    Buf.str(b, Ccore.bytes(a[i]));
                     a[i] := Ccore.bufVal(ADR(b));
                 end;
             end;
             return r;
         end;
     end;
-    off := gather(p, cx, prefix, kind, given, Vals.all(ADR(ans)), out);
+    off := gather(p, cx, prefix, kind, given, Vals.all(ans), out);
     if (out^.len > 0) or (LEN(p) = off) then return false; end;
-    off := gather(p, cx, fuzzy, kind, given, Vals.all(ADR(ans)), out);
+    off := gather(p, cx, fuzzy, kind, given, Vals.all(ans), out);
     rank(out, off, p[off..LEN(p)]);
     return true;
 end;

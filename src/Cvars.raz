@@ -58,7 +58,7 @@ var
 proc look(t: ^Vars.Vec; lo: INT; name: []U8): ^Var;
 var a: []Var; i: INT;
 begin
-    a := Vars.all(t);
+    a := Vars.all(t^);
     for i := LEN(a) - 1 to lo by -1 do
         if a[i].name = name then return ADR(a[i]); end;
     end;
@@ -69,7 +69,7 @@ end;
 proc add(t: ^Vars.Vec; name: []U8): ^Var;
 var r: ^Var;
 begin
-    r := Vars.add(t);
+    r := Vars.add(t^);
     r^.name := name;
     return r;
 end;
@@ -112,7 +112,7 @@ end;
 (* Every global, oldest first, until one is made or unset. *)
 proc allGlobals*: []Var;
 begin
-    return Vars.all(ADR(globals));
+    return Vars.all(globals);
 end;
 
 (* v kept as r's value, unless r is read-only. *)
@@ -156,11 +156,11 @@ end;
 proc remove(t: ^Vars.Vec; r: ^Var);
 var a: []Var; i: INT;
 begin
-    a := Vars.all(t);
+    a := Vars.all(t^);
     i := r - ADR(a[0]);
     Ccore.drop(r^.v);
     COPY(a[i..LEN(a) - 1], a[i + 1..LEN(a)]);
-    Vars.resize(t, LEN(a) - 1);
+    Vars.resize(t^, LEN(a) - 1);
 end;
 
 (* unset name: a local of the frame on top, else a global; nothing if
@@ -256,9 +256,9 @@ end;
 proc leave*(f: Frame);
 var a: []Var; i: INT;
 begin
-    a := Vars.all(ADR(locals));
+    a := Vars.all(locals);
     for i := f.top to LEN(a) - 1 do Ccore.drop(a[i].v); end;
-    Vars.resize(ADR(locals), f.top);
+    Vars.resize(locals, f.top);
     base := f.base;
     depth := f.depth;
 end;
@@ -268,7 +268,7 @@ end;
 proc findProc*(name: []U8): ^Csyntax.Stmt;
 var a: []^Csyntax.Stmt; i: INT;
 begin
-    a := Procs.all(ADR(procs));
+    a := Procs.all(procs);
     for i := 0 to LEN(a) - 1 do
         if a[i]^.s = name then return a[i]; end;
     end;
@@ -279,19 +279,19 @@ end;
 proc defineProc*(s: ^Csyntax.Stmt);
 var a: []^Csyntax.Stmt; i: INT;
 begin
-    a := Procs.all(ADR(procs));
+    a := Procs.all(procs);
     for i := 0 to LEN(a) - 1 do
         if a[i]^.s = s^.s then
             a[i] := s;
             return;
         end;
     end;
-    Procs.push(ADR(procs), s);
+    Procs.push(procs, s);
 end;
 
 proc allProcs*: []^Csyntax.Stmt;
 begin
-    return Procs.all(ADR(procs));
+    return Procs.all(procs);
 end;
 
 (* ------------------------------------------------- "did you mean" *)
@@ -338,7 +338,7 @@ var b: Best; a: []^Csyntax.Stmt; i: INT;
 begin
     bestInit(ADR(b));
     for i := 0 to LEN(Csyntax.Builtins) - 1 do consider(ADR(b), Csyntax.Builtins[i].name, name); end;
-    a := Procs.all(ADR(procs));
+    a := Procs.all(procs);
     for i := 0 to LEN(a) - 1 do consider(ADR(b), a[i]^.s, name); end;
     return failMeaning("unknown routine", name, ADR(b));
 end;
@@ -348,10 +348,10 @@ var b: Best; a: []Var; i: INT;
 begin
     bestInit(ADR(b));
     if depth > 0 then
-        a := Vars.all(ADR(locals));
+        a := Vars.all(locals);
         for i := LEN(a) - 1 to base by -1 do consider(ADR(b), a[i].name, name); end;
     end;
-    a := Vars.all(ADR(globals));
+    a := Vars.all(globals);
     for i := LEN(a) - 1 to 0 by -1 do consider(ADR(b), a[i].name, name); end;
     return failMeaning("undefined variable", name, ADR(b));
 end;
@@ -367,9 +367,9 @@ end;
 proc passwd*(names, homes: ^Names.Vec);
 var b: Buf.Buf; s, l: []U8; at: [7]INT; i, f: INT; more: BOOL;
 begin
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if Ccore.readFile("/etc/passwd", ADR(b)) < 0 then return; end;
-    s := Buf.bytes(ADR(b));
+    s := Buf.bytes(b);
     more := true;
     while more do
         l, s, more := Str.cut(s, "\n");
@@ -381,8 +381,8 @@ begin
             end;
         end;
         if f = 6 then
-            Names.push(names, l[0..at[1] - 1]);
-            Names.push(homes, l[at[5]..at[6] - 1]);
+            Names.push(names^, l[0..at[1] - 1]);
+            Names.push(homes^, l[at[5]..at[6] - 1]);
         end;
     end;
 end;
@@ -392,12 +392,12 @@ end;
 proc userHome*(name: []U8): ([]U8, BOOL);
 var names, homes: Names.Vec; a: [][]U8; i: INT;
 begin
-    Names.init(ADR(names), Ccore.temps);
-    Names.init(ADR(homes), Ccore.temps);
+    Names.init(names, Ccore.temps);
+    Names.init(homes, Ccore.temps);
     passwd(ADR(names), ADR(homes));
-    a := Names.all(ADR(names));
+    a := Names.all(names);
     for i := 0 to LEN(a) - 1 do
-        if a[i] = name then return Names.all(ADR(homes))[i], true; end;
+        if a[i] = name then return Names.all(homes)[i], true; end;
     end;
     return "", false;
 end;
@@ -415,8 +415,8 @@ begin
         h, ok := userHome(p[1..k]);
         if not ok then return false; end;
     end;
-    Buf.str(b, h);
-    Buf.str(b, p[k..LEN(p)]);
+    Buf.str(b^, h);
+    Buf.str(b^, p[k..LEN(p)]);
     return true;
 end;
 
@@ -451,7 +451,7 @@ begin
 end;
 
 begin
-    Vars.init(ADR(globals), Heap.heap);
-    Vars.init(ADR(locals), Heap.heap);
-    Procs.init(ADR(procs), Heap.heap);
+    Vars.init(globals, Heap.heap);
+    Vars.init(locals, Heap.heap);
+    Procs.init(procs, Heap.heap);
 end Cvars.

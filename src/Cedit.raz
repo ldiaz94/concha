@@ -243,7 +243,7 @@ proc num(b: ^Buf.Buf; n: INT);
 var d: [20]U8; k: INT;
 begin
     d, k := Str.fromInt(n);
-    Buf.str(b, d[0..k]);
+    Buf.str(b^, d[0..k]);
 end;
 
 proc bell;
@@ -416,7 +416,7 @@ end;
 
 proc text: []U8;
 begin
-    return Buf.bytes(ADR(line));
+    return Buf.bytes(line);
 end;
 
 proc prevB(i: INT): INT;
@@ -439,7 +439,7 @@ var t: []U8; n: INT;
 begin
     n := LEN(s);
     if n = 0 then return; end;
-    _ := Buf.spare(ADR(line), n);
+    _ := Buf.spare(line, n);
     INC(line.len, n);
     t := text();
     COPY(t[cur + n..line.len], t[cur..line.len - n]);
@@ -472,8 +472,8 @@ end;
 (* The line made s, with the cursor at its end. *)
 proc setLine(s: []U8);
 begin
-    Buf.reset(ADR(line));
-    Buf.str(ADR(line), s);
+    Buf.reset(line);
+    Buf.str(line, s);
     cur := LEN(s);
 end;
 
@@ -509,11 +509,11 @@ proc kill(a, b: INT; back: BOOL);
 var n: INT; k: []U8;
 begin
     if b <= a then return; end;
-    if not wasKilling then Buf.reset(ADR(killed)); end;
+    if not wasKilling then Buf.reset(killed); end;
     n := b - a;
-    _ := Buf.spare(ADR(killed), n);
+    _ := Buf.spare(killed, n);
     INC(killed.len, n);
-    k := Buf.bytes(ADR(killed));
+    k := Buf.bytes(killed);
     if back then
         COPY(k[n..killed.len], k[0..killed.len - n]);
         COPY(k[0..n], text()[a..b]);
@@ -845,9 +845,9 @@ end;
 
 proc colourOn(b: ^Buf.Buf; k: INT);
 begin
-    Buf.str(b, "\x1b[");
-    Buf.str(b, hiCodes[k]);
-    Buf.add(b, 'm');
+    Buf.str(b^, "\x1b[");
+    Buf.str(b^, hiCodes[k]);
+    Buf.add(b^, 'm');
 end;
 
 (* The line into b, with colour escapes where the class changes, and
@@ -863,15 +863,15 @@ begin
     prev := hPlain;
     for i := 0 to LEN(t) - 1 do
         if (LEN(h) > 0) and (h[i] # prev) then
-            if prev # hPlain then Buf.str(b, "\x1b[0m"); end;
+            if prev # hPlain then Buf.str(b^, "\x1b[0m"); end;
             if h[i] # hPlain then colourOn(b, h[i]); end;
             prev := h[i];
         end;
         c := t[i];
         if c < ' ' then c := ' '; end;
-        Buf.add(b, c);
+        Buf.add(b^, c);
     end;
-    if prev # hPlain then Buf.str(b, "\x1b[0m"); end;
+    if prev # hPlain then Buf.str(b^, "\x1b[0m"); end;
 end;
 
 (* ----------------------------------------------------------- drawing *)
@@ -884,56 +884,56 @@ var b: Buf.Buf; m: Ccore.Mark; w, endA, endRow, ta, tRow, tCol, i: INT; wrapped:
 begin
     m := Ccore.mark();
     w := cols();
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if curRow > 0 then
-        Buf.str(ADR(b), "\x1b[");
+        Buf.str(b, "\x1b[");
         num(ADR(b), curRow);
-        Buf.add(ADR(b), 'A');
+        Buf.add(b, 'A');
     end;
-    Buf.add(ADR(b), '\r');
+    Buf.add(b, '\r');
     if startCol > 0 then
-        Buf.str(ADR(b), "\x1b[");
+        Buf.str(b, "\x1b[");
         num(ADR(b), startCol);
-        Buf.add(ADR(b), 'C');
+        Buf.add(b, 'C');
     end;
-    Buf.str(ADR(b), "\x1b[J");
+    Buf.str(b, "\x1b[J");
     paint(ADR(b));
     if LEN(sfx) > 0 then
-        Buf.str(ADR(b), "\x1b[2m");
+        Buf.str(b, "\x1b[2m");
         for i := 0 to LEN(sfx) - 1 do
-            if sfx[i] < ' ' then Buf.add(ADR(b), ' '); else Buf.add(ADR(b), sfx[i]); end;
+            if sfx[i] < ' ' then Buf.add(b, ' '); else Buf.add(b, sfx[i]); end;
         end;
-        Buf.str(ADR(b), "\x1b[0m");
+        Buf.str(b, "\x1b[0m");
     end;
     endA := startCol + columns(text()) + columns(sfx);
     wrapped := (endA > 0) and (endA mod w = 0);
-    if wrapped then Buf.str(ADR(b), "\r\n"); end;
+    if wrapped then Buf.str(b, "\r\n"); end;
     endRow := endA div w;
     if rows > 0 then
         (* a wrapped line already stands at the start of an empty row *)
         if not wrapped then
-            Buf.str(ADR(b), "\r\n");
+            Buf.str(b, "\r\n");
             INC(endRow);
         end;
-        Buf.str(ADR(b), below);
+        Buf.str(b, below);
         INC(endRow, rows - 1);
     end;
     ta := startCol + columns(text()[0..cur]);
     tRow := ta div w;
     tCol := ta mod w;
     if endRow > tRow then
-        Buf.str(ADR(b), "\x1b[");
+        Buf.str(b, "\x1b[");
         num(ADR(b), endRow - tRow);
-        Buf.add(ADR(b), 'A');
+        Buf.add(b, 'A');
     end;
-    Buf.add(ADR(b), '\r');
+    Buf.add(b, '\r');
     if tCol > 0 then
-        Buf.str(ADR(b), "\x1b[");
+        Buf.str(b, "\x1b[");
         num(ADR(b), tCol);
-        Buf.add(ADR(b), 'C');
+        Buf.add(b, 'C');
     end;
     curRow := tRow;
-    Ccore.put(2, Buf.bytes(ADR(b)));
+    Ccore.put(2, Buf.bytes(b));
     Ccore.release(m);
 end;
 
@@ -958,17 +958,17 @@ proc histPush(s: []U8);
 var h: [][]U8;
 begin
     if hist.len = maxHist then
-        h := Names.all(ADR(hist));
+        h := Names.all(hist);
         Str.free(Heap.heap, h[0]);
         COPY(h[0..maxHist - 1], h[1..maxHist]);
-        Names.resize(ADR(hist), maxHist - 1);
+        Names.resize(hist, maxHist - 1);
     end;
-    Names.push(ADR(hist), Ccore.perm(s));
+    Names.push(hist, Ccore.perm(s));
 end;
 
 proc entry(i: INT): []U8;
 begin
-    return Names.all(ADR(hist))[i];
+    return Names.all(hist)[i];
 end;
 
 proc blankLine(s: []U8): BOOL;
@@ -1003,10 +1003,10 @@ proc histLoad*(path: []U8);
 var b: Buf.Buf; s: []U8; i, j, total, fd: INT;
 begin
     histPath := Ccore.perm(path);
-    Buf.init(ADR(b), Heap.heap);
-    defer Buf.done(ADR(b));
+    Buf.init(b, Heap.heap);
+    defer Buf.done(b);
     if Ccore.readFile(path, ADR(b)) # 0 then return; end;
-    s := Buf.bytes(ADR(b));
+    s := Buf.bytes(b);
     total := 0;
     i := 0;
     while i < LEN(s) do
@@ -1127,12 +1127,12 @@ begin
     wn := LEN(was);
     for i := 0 to LEN(h) - wn do
         if ((i = 0) or edge(h[i - 1])) and ((i + wn = LEN(h)) or edge(h[i + wn])) and (h[i..i + wn] = was) then
-            Buf.init(ADR(b), Ccore.temps);
-            Buf.str(ADR(b), h[0..i]);
-            Buf.str(ADR(b), fix);
-            Buf.str(ADR(b), h[i + wn..LEN(h)]);
+            Buf.init(b, Ccore.temps);
+            Buf.str(b, h[0..i]);
+            Buf.str(b, fix);
+            Buf.str(b, h[i + wn..LEN(h)]);
             Str.free(Heap.heap, fixed);
-            fixed := Ccore.perm(Buf.bytes(ADR(b)));
+            fixed := Ccore.perm(Buf.bytes(b));
             return;
         end;
     end;
@@ -1198,13 +1198,13 @@ begin
     fi := hist.len;
     orig := Ccore.perm(text());
     defer Str.free(Heap.heap, orig);
-    Buf.init(ADR(s), Heap.heap);
-    defer Buf.done(ADR(s));
+    Buf.init(s, Heap.heap);
+    defer Buf.done(s);
     while true do
-        Buf.reset(ADR(s));
-        Buf.str(ADR(s), searchTag);
-        Buf.str(ADR(s), q[0..qn]);
-        show(Buf.bytes(ADR(s)), "", 0);
+        Buf.reset(s);
+        Buf.str(s, searchTag);
+        Buf.str(s, q[0..qn]);
+        show(Buf.bytes(s), "", 0);
         k := getKey();
         match k of
         | ctrlR: fi := look(q[0..qn], fi - 1, fi);
@@ -1250,29 +1250,29 @@ begin
         INC(i);
         if q = '\'' then
             if c # '\'' then
-                Buf.add(o, c);
+                Buf.add(o^, c);
             elsif (i < b) and (t[i] = '\'') then
-                Buf.add(o, c);
+                Buf.add(o^, c);
                 INC(i);
             else
                 q := 0;
             end;
         elsif q = '"' then
             if (c = '\\') and (i < b) and oneOf(t[i], "\"\\$`") then
-                Buf.add(o, t[i]);
+                Buf.add(o^, t[i]);
                 INC(i);
             elsif c = '"' then
                 q := 0;
             else
-                Buf.add(o, c);
+                Buf.add(o^, c);
             end;
         elsif (c = '\\') and (i < b) then
-            Buf.add(o, t[i]);
+            Buf.add(o^, t[i]);
             INC(i);
         elsif (c = '\'') or (c = '"') then
             q := c;
         else
-            Buf.add(o, c);
+            Buf.add(o^, c);
         end;
     end;
 end;
@@ -1410,13 +1410,13 @@ var i: INT;
 begin
     for i := 0 to LEN(s) - 1 do
         if q = '\'' then
-            if s[i] = '\'' then Buf.add(o, '\''); end;
+            if s[i] = '\'' then Buf.add(o^, '\''); end;
         elsif q = '"' then
-            if oneOf(s[i], "\"\\$`") then Buf.add(o, '\\'); end;
+            if oneOf(s[i], "\"\\$`") then Buf.add(o^, '\\'); end;
         elsif oneOf(s[i], " \t;|&<>`'\"$\\*?[(){}") or (i = 0) and (s[i] = '~') and not home then
-            Buf.add(o, '\\');
+            Buf.add(o^, '\\');
         end;
-        Buf.add(o, s[i]);
+        Buf.add(o^, s[i]);
     end;
 end;
 
@@ -1431,7 +1431,7 @@ end;
 proc sortOut(v: ^Vals.Vec);
 var a: []Ccore.Val; i, j, k: INT; t: Ccore.Val;
 begin
-    a := Vals.all(v);
+    a := Vals.all(v^);
     for i := 1 to LEN(a) - 1 do
         t := a[i];
         j := i;
@@ -1448,7 +1448,7 @@ begin
             INC(k);
         end;
     end;
-    Vals.resize(v, k);
+    Vals.resize(v^, k);
 end;
 
 (* What a list shows of a candidate: what follows the skip bytes of
@@ -1469,16 +1469,16 @@ begin
     s := Ccore.bytes(v);
     if LEN(s) = 0 then return hPlain; end;
     if s[LEN(s) - 1] = '/' then return hDir; end;
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     if (LEN(s) > 1) and (s[0] = '~') and (s[1] = '/') then
         home := Sys.env("HOME");    (* HOME from the environment is close enough *)
         if LEN(home) = 0 then return hPlain; end;
-        Buf.str(ADR(b), home);
-        Buf.str(ADR(b), s[1..LEN(s)]);
+        Buf.str(b, home);
+        Buf.str(b, s[1..LEN(s)]);
     else
-        Buf.str(ADR(b), s);
+        Buf.str(b, s);
     end;
-    if Sys.access(Buf.bytes(ADR(b)), {Sys.executing}) = 0 then return hExe; end;
+    if Sys.access(Buf.bytes(b), {Sys.executing}) = 0 then return hExe; end;
     return hPlain;
 end;
 
@@ -1488,11 +1488,11 @@ end;
 proc take(s: []U8; whole: BOOL);
 var e: Buf.Buf; a: INT; q: U8;
 begin
-    Buf.init(ADR(e), Ccore.temps);
+    Buf.init(e, Ccore.temps);
     a := wd.a;
     q := wd.q;
     if wd.isVar then
-        Buf.str(ADR(e), s);
+        Buf.str(e, s);
     elsif (wd.pre > 0) and ((LEN(s) < wd.pre) or (s[0..wd.pre] # wd.typed[0..wd.pre])) then
         (* a fuzzy match changed what lies before the open quote: the
            whole word typed again, escaped instead of quoted *)
@@ -1503,10 +1503,10 @@ begin
         escape(s[wd.pre..LEN(s)], q, wd.home, ADR(e));
     end;
     if whole and (LEN(s) > 0) and (s[LEN(s) - 1] # '/') then
-        if (q # 0) and not wd.isVar then Buf.add(ADR(e), q); end;
-        if (q = 0) or not wd.isVar then Buf.add(ADR(e), ' '); end;
+        if (q # 0) and not wd.isVar then Buf.add(e, q); end;
+        if (q = 0) or not wd.isVar then Buf.add(e, ' '); end;
     end;
-    replace(a, Buf.bytes(ADR(e)));
+    replace(a, Buf.bytes(e));
 end;
 
 (* The rows topRow to topRow + vis - 1 of the menu, and below them which
@@ -1514,10 +1514,10 @@ end;
 proc lay(m: ^Menu; v: []Ccore.Val; skip: INT);
 var b: Buf.Buf; r, c, i, j, n, cls, shown, col, cw: INT; p: []U8; ch: I32;
 begin
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     shown := m^.vis;
     for r := m^.topRow to m^.topRow + m^.vis - 1 do
-        if r > m^.topRow then Buf.str(ADR(b), "\r\n"); end;
+        if r > m^.topRow then Buf.str(b, "\r\n"); end;
         for c := 0 to m^.ncol - 1 do
             i := c * m^.nrow + r;
             if i >= LEN(v) then break; end;
@@ -1536,26 +1536,26 @@ begin
             cls := hPlain;
             if Ccore.opts^.colour then cls := listColour(v[i]); end;
             if cls # hPlain then colourOn(ADR(b), cls); end;
-            if i = m^.sel then Buf.str(ADR(b), "\x1b[7m"); end;
-            Buf.str(ADR(b), p);
-            if (cls # hPlain) or (i = m^.sel) then Buf.str(ADR(b), "\x1b[0m"); end;
+            if i = m^.sel then Buf.str(b, "\x1b[7m"); end;
+            Buf.str(b, p);
+            if (cls # hPlain) or (i = m^.sel) then Buf.str(b, "\x1b[0m"); end;
             if (c < m^.ncol - 1) and (i + m^.nrow < LEN(v)) then
-                for j := columns(p) to m^.cw - 1 do Buf.add(ADR(b), ' '); end;
+                for j := columns(p) to m^.cw - 1 do Buf.add(b, ' '); end;
             end;
         end;
     end;
     if m^.vis < m^.nrow then
-        Buf.str(ADR(b), "\r\n\x1b[2mrows ");
+        Buf.str(b, "\r\n\x1b[2mrows ");
         num(ADR(b), m^.topRow + 1);
-        Buf.add(ADR(b), '-');
+        Buf.add(b, '-');
         num(ADR(b), m^.topRow + m^.vis);
-        Buf.str(ADR(b), " of ");
+        Buf.str(b, " of ");
         num(ADR(b), m^.nrow);
-        Buf.str(ADR(b), "\x1b[0m");
+        Buf.str(b, "\x1b[0m");
         INC(shown);
     end;
     if m^.h < 1 then shown := 0; end;
-    show("", Buf.bytes(ADR(b)), shown);
+    show("", Buf.bytes(b), shown);
 end;
 
 proc pick(m: ^Menu; v: []Ccore.Val; i: INT);
@@ -1639,11 +1639,11 @@ var t: []U8; s: Scan; cx: Context; e: Buf.Buf; words: Vals.Vec; i, st: INT;
 begin
     t := text();
     cx := scan(ADR(s));
-    Vals.init(ADR(words), Ccore.temps);
+    Vals.init(words, Ccore.temps);
     for i := 0 to s.spans.n - 1 do
-        Buf.init(ADR(e), Ccore.temps);
+        Buf.init(e, Ccore.temps);
         unquote(t, s.spans.a[i], s.spans.b[i], 0, ADR(e));
-        Vals.push(ADR(words), Ccore.strVal(Buf.bytes(ADR(e))));
+        Vals.push(words, Ccore.strVal(Buf.bytes(e)));
     end;
     (* $name: a variable *)
     st := cur;
@@ -1655,21 +1655,21 @@ begin
     if wd.isVar then
         wd.a := st - 1;
         wd.ws := wd.a;
-        Buf.str(b, t[wd.a..cur]);
+        Buf.str(b^, t[wd.a..cur]);
         cx := cxArg;
-        Vals.reset(ADR(words));
+        Vals.reset(words);
     else
         unquote(t, s.ws, cur, 0, b);
         wd.a := s.ws;
         if s.q # 0 then
             wd.a := s.qs;
-            Buf.init(ADR(e), Ccore.temps);
+            Buf.init(e, Ccore.temps);
             unquote(t, s.qs, cur, s.q, ADR(e));
             wd.pre := b^.len - e.len;
         end;
     end;
-    wd.typed := Buf.bytes(b);
-    if not fn(wd.typed, cx, Vals.all(ADR(words)), out) then sortOut(out); end;
+    wd.typed := Buf.bytes(b^);
+    if not fn(wd.typed, cx, Vals.all(words), out) then sortOut(out); end;
 end;
 
 (* What Tab would offer at the end of the line s, as a list, without
@@ -1681,11 +1681,11 @@ begin
     keepLine := line;
     keepCur := cur;
     keepWd := wd;
-    Buf.init(ADR(line), Ccore.temps);
-    Buf.str(ADR(line), s);
+    Buf.init(line, Ccore.temps);
+    Buf.str(line, s);
     cur := LEN(s);
-    Buf.init(ADR(b), Ccore.temps);
-    Vals.init(ADR(out), Ccore.temps);
+    Buf.init(b, Ccore.temps);
+    Vals.init(out, Ccore.temps);
     candidates(fn, ADR(b), ADR(out));
     line := keepLine;
     cur := keepCur;
@@ -1704,14 +1704,14 @@ begin
     end;
     m := Ccore.mark();
     defer Ccore.release(m);
-    Buf.init(ADR(b), Ccore.temps);
-    Vals.init(ADR(out), Ccore.temps);
+    Buf.init(b, Ccore.temps);
+    Vals.init(out, Ccore.temps);
     candidates(hooks^.complete, ADR(b), ADR(out));
-    v := Vals.all(ADR(out));
+    v := Vals.all(out);
     skip := 0;
     if not wd.isVar then
         for i := 0 to b.len - 1 do
-            if Buf.bytes(ADR(b))[i] = '/' then skip := i + 1; end;
+            if Buf.bytes(b)[i] = '/' then skip := i + 1; end;
         end;
     end;
     if LEN(v) = 0 then
@@ -1747,11 +1747,11 @@ begin
         bell;
         return false;
     end;
-    Buf.init(ADR(p), Ccore.temps);
-    Buf.str(ADR(p), "/tmp/concha-");
+    Buf.init(p, Ccore.temps);
+    Buf.str(p, "/tmp/concha-");
     num(ADR(p), Sys.pid());
-    Buf.str(ADR(p), ".cn");
-    path := Buf.bytes(ADR(p));
+    Buf.str(p, ".cn");
+    path := Buf.bytes(p);
     _ := Sys.remove(path);
     fd := Sys.openMode(path, {Sys.writing, Sys.creating, Sys.exclusive}, Ccore.permOwn);
     if fd < 0 then
@@ -1764,11 +1764,11 @@ begin
     finish;
     reset;
     hooks^.editor(path);
-    Buf.init(ADR(b), Ccore.temps);
+    Buf.init(b, Ccore.temps);
     _ := Ccore.readFile(path, ADR(b));
     _ := Sys.remove(path);
     rawOn;
-    s := Buf.bytes(ADR(b));
+    s := Buf.bytes(b);
     n := LEN(s);
     while (n > 0) and oneOf(s[n - 1], " \t\n\r") do DEC(n); end;
     s := s[0..n];
@@ -1814,7 +1814,7 @@ begin
     fixed := "";
     rawOn;
     queryCol;
-    Buf.reset(ADR(line));
+    Buf.reset(line);
     cur := 0;
     curRow := 0;
     hidx := hist.len;
@@ -1851,7 +1851,7 @@ begin
             finish;
             reset;
             histAdd(text());
-            Buf.add(ADR(line), '\n');
+            Buf.add(line, '\n');
             return gotLine, text();
         | ctrlC:
             cur := line.len;
@@ -1878,7 +1878,7 @@ begin
         | ctrlU: kill(0, cur, true);
         | ctrlW, kKillWord: kill(wordLeft(cur), cur, true);
         | kKillWordR: kill(cur, wordRight(cur), false);
-        | ctrlY: insert(Buf.bytes(ADR(killed)));
+        | ctrlY: insert(Buf.bytes(killed));
         | ctrlUnderscore: undoPop;
         | kWordL: cur := wordLeft(cur);
         | kWordR:
@@ -1903,7 +1903,7 @@ begin
             end;
         | kInEditor:
             if inEditor() then
-                Buf.add(ADR(line), '\n');
+                Buf.add(line, '\n');
                 return gotLine, text();
             end;
         | else:
@@ -1921,7 +1921,7 @@ end;
 
 begin
     hooks := ADR(hooksAt);
-    Buf.init(ADR(line), Heap.heap);
-    Buf.init(ADR(killed), Heap.heap);
-    Names.init(ADR(hist), Heap.heap);
+    Buf.init(line, Heap.heap);
+    Buf.init(killed, Heap.heap);
+    Names.init(hist, Heap.heap);
 end Cedit.

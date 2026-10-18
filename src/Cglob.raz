@@ -108,7 +108,7 @@ begin
     i := 0;
     while i < LEN(p) do
         if (p[i] = '\\') and (i + 1 < LEN(p)) then INC(i); end;
-        Buf.add(b, p[i]);
+        Buf.add(b^, p[i]);
         INC(i);
     end;
 end;
@@ -127,8 +127,8 @@ end;
 proc copyOf(b: ^Buf.Buf): Buf.Buf;
 var c: Buf.Buf;
 begin
-    Buf.init(ADR(c), Ccore.temps);
-    Buf.str(ADR(c), Buf.bytes(b));
+    Buf.init(c, Ccore.temps);
+    Buf.str(c, Buf.bytes(b^));
     return c;
 end;
 
@@ -145,32 +145,32 @@ begin
     if not hasMeta(p[0..i]) then
         b := copyOf(pre);
         addUnescaped(ADR(b), p[0..i]);
-        if slash then Buf.add(ADR(b), '/'); end;
+        if slash then Buf.add(b, '/'); end;
         if r < LEN(p) then
             globIn(ADR(b), p[r..LEN(p)], out);
-        elsif pathKind(Buf.bytes(ADR(b))) # none then
-            Vals.push(out, Ccore.bufVal(ADR(b)));
+        elsif pathKind(Buf.bytes(b)) # none then
+            Vals.push(out^, Ccore.bufVal(ADR(b)));
         end;
         return;
     end;
-    from := Buf.bytes(pre);
+    from := Buf.bytes(pre^);
     if LEN(from) = 0 then from := "."; end;
-    if Sys.openDir(ADR(d), from) # 0 then return; end;
-    nm, ok := Sys.nextEntry(ADR(d));
+    if Sys.openDir(d, from) # 0 then return; end;
+    nm, ok := Sys.nextEntry(d);
     while ok do
         if ((nm[0] # '.') or (p[0] = '.')) and matches(p[0..i], nm) then
             b := copyOf(pre);
-            Buf.str(ADR(b), nm);
+            Buf.str(b, nm);
             if not slash then
-                Vals.push(out, Ccore.bufVal(ADR(b)));
-            elsif pathKind(Buf.bytes(ADR(b))) = dir then
-                Buf.add(ADR(b), '/');
-                if r < LEN(p) then globIn(ADR(b), p[r..LEN(p)], out); else Vals.push(out, Ccore.bufVal(ADR(b))); end;
+                Vals.push(out^, Ccore.bufVal(ADR(b)));
+            elsif pathKind(Buf.bytes(b)) = dir then
+                Buf.add(b, '/');
+                if r < LEN(p) then globIn(ADR(b), p[r..LEN(p)], out); else Vals.push(out^, Ccore.bufVal(ADR(b))); end;
             end;
         end;
-        nm, ok := Sys.nextEntry(ADR(d));
+        nm, ok := Sys.nextEntry(d);
     end;
-    Sys.closeDir(ADR(d));
+    Sys.closeDir(d);
 end;
 
 (* The paths that match the pattern pat, sorted, added to out: how many. *)
@@ -178,13 +178,13 @@ proc glob*(pat: []U8; out: ^Vals.Vec): INT;
 var pre: Buf.Buf; a: []Ccore.Val; t: Ccore.Val; start, i, j: INT;
 begin
     start := out^.len;
-    Buf.init(ADR(pre), Ccore.temps);
+    Buf.init(pre, Ccore.temps);
     if (LEN(pat) > 0) and (pat[0] = '/') then
-        Buf.add(ADR(pre), '/');
+        Buf.add(pre, '/');
         while (LEN(pat) > 0) and (pat[0] = '/') do pat := pat[1..LEN(pat)]; end;
     end;
     if LEN(pat) > 0 then globIn(ADR(pre), pat, out); end;
-    a := Vals.all(out);
+    a := Vals.all(out^);
     for i := start + 1 to LEN(a) - 1 do    (* insertion sort *)
         t := a[i];
         j := i - 1;
