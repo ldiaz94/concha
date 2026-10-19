@@ -62,7 +62,7 @@ type
     Scan = record
         ws, qs: INT;
         q: U8;
-        inWord, expect, expr, wcmd, cd, redir: BOOL;
+        inWord, expect, expr, wcmd, cd, names, redir: BOOL;
         nest: U64;    (* expr at each open parenthesis, a bit a level *)
         spans: Spans;
     end;
@@ -1287,6 +1287,7 @@ begin
     w := t[s.ws..b];
     if s.wcmd then
         s.cd := w = "cd";
+        s.names := (w = "type") or (w = "help");
         s.spans.n := 0;
     end;
     s.expect := false;
@@ -1310,7 +1311,7 @@ end;
    expression follows :=, a Pascal keyword that takes one, or a
    parenthesis right after a word (a call, or $(); in one, any
    character not of a name ends a word. The arguments of a cd are
-   directories. Each parenthesis pushes the state onto nest, and the
+   directories, and those of type and help command words. Each parenthesis pushes the state onto nest, and the
    closing one pops it. The spans are the words of the command so far,
    redirections left out; none unless the word is an argument. *)
 proc scan(var s: Scan): Context;
@@ -1399,6 +1400,8 @@ begin
         return cxCommand;
     elsif s.cd then
         return cxDir;
+    elsif s.names then
+        return cxCommand;
     end;
     return cxArg;
 end;

@@ -816,6 +816,20 @@ was stopped, and wait for it.
 .Ev status
 is its status.
 Only an interactive shell has jobs to bring back.
+.It Ic help Op Ar name No ...
+With no
+.Ar name ,
+list the builtin commands and routines and how each is used.
+For a procedure or function, print its heading, the file and line it
+was declared at, and the comment just above it: a run of
+.Ql //
+lines, or a
+.Ql { ... }
+that opens its own line.
+For a builtin, print how it is used; for a keyword, point here.
+The status is 1 if any
+.Ar name
+is neither.
 .It Ic jobs
 List the jobs: number, process id, whether running or stopped, and
 the command.
@@ -852,6 +866,21 @@ restores the default, and
 ignores the signal.
 See
 .Sx SIGNALS .
+.It Ic type Ar name No ...
+Say what each
+.Ar name
+is, a line for each thing it names: a keyword; then, in the order a
+command looks for them, a procedure or function and where it was
+declared, a builtin, and each program of that name along
+.Ev PATH ,
+so the first of these is what runs and the rest are shadowed by it;
+and last a builtin routine, which a call names rather than a command.
+A program that
+.Ev PATH
+reaches twice, through a symbolic link, is listed once.
+The status is 1 if any
+.Ar name
+is none of them.
 .It Ic ulimit Oo Fl c | f | n | s | t | v Oc Op Ar value | Cm unlimited
 Print or set a soft resource limit for the shell and the commands it
 starts:
@@ -1205,7 +1234,11 @@ below); otherwise, then the command's completion file, if it has one
 .Pq Xr concha-complete 5 ;
 otherwise an argument of
 .Ic cd
-completes to a directory.
+completes to a directory, and one of
+.Ic type
+or
+.Ic help
+as a first word does.
 .Cm ~ Ns Ar user
 completes to a user's home,
 .Cm ~ Ns Ar user Ns Cm / .

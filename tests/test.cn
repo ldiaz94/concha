@@ -258,6 +258,52 @@ check('exec redirects shell', `$cn -c "exec > $execf; echo y"; cat $execf`, 'y')
 rm -f $execf
 check('exec not found', `exec nosuchcmd 2>&1; writeln(status)`, 'concha: nosuchcmd: not found'#10'127')
 
+{ type and help }
+var helpfile := '/tmp/concha_test_help.cn'
+begin
+  writeln('{ braced, over');
+  writeln('    two lines }');
+  writeln('procedure braced; begin end;');
+  writeln('// slashed');
+  writeln('function slashed(a, b); begin end;');
+  writeln('x := 1 { not a heading }');
+  writeln('procedure bare; begin end;');
+  writeln('procedure echo; begin end;');
+  writeln('export PATH := ''/nonexistent''');
+  writeln('help braced slashed bare');
+  writeln('type echo nosuch; writeln(status)')
+end > $helpfile
+check('help and type', `$cn $helpfile 2>&1`, join([
+  'procedure braced, ' + helpfile + ':3', '  braced, over', '  two lines',
+  'function slashed(a, b), ' + helpfile + ':5', '  slashed',
+  'procedure bare, ' + helpfile + ':7',
+  'echo: procedure, ' + helpfile + ':8', 'echo: builtin, echo [-n arg ...]',
+  'concha: nosuch: not found', '1'], #10))
+check('help builtin', `help split`, 'split(s[, sep])')
+check('help unknown', `help nosuch 2>&1; writeln(status)`, 'concha: nosuch: no help; is it a program? man nosuch' + #10 + '1')
+rm -f $helpfile
+// A program PATH reaches twice, through a link, is said once; a
+// second one of that name is shadowed, and said after it.
+var typedir := '/tmp/concha_test_type'
+rm -rf $typedir
+mkdir -p $typedir/a $typedir/b
+ln -s a $typedir/link
+begin writeln('#!/bin/sh') end > $typedir/a/prog
+cp $typedir/a/prog $typedir/b/prog
+chmod +x $typedir/a/prog $typedir/b/prog
+check('type path', `export PATH := "$typedir/a:$typedir/link:$typedir/b"; type prog begin`, join([
+  'prog: ' + typedir + '/a/prog', 'prog: ' + typedir + '/b/prog', 'begin: keyword'], #10))
+// help still finds the comment of a procedure from a script named
+// from the working directory, after a cd.
+begin
+  writeln('// from here');
+  writeln('procedure here; begin end;');
+  writeln('cd /');
+  writeln('help here')
+end > $typedir/rel.cn
+check('help after cd', `cd $typedir; $cn rel.cn`, 'procedure here, ' + typedir + '/rel.cn:2'#10'  from here')
+rm -rf $typedir
+
 { umask and unset }
 var oldmask := `umask`
 umask 077
@@ -682,6 +728,8 @@ check('complete expression', completions('x := lengt'), ['length'])
 check('complete expression in call', 'zzvar1' in completions('writeln(zzv'), true)
 check('complete file', completions('cat ' + cdir + '/s'), [cdir + '/sfile', cdir + '/sub/'])
 check('complete cd', completions('cd ' + cdir + '/s'), [cdir + '/sub/'])
+check('complete type', `env PATH=$cdir/bin $cn -c 'write(join(completions("type zz"), " "))'`, 'zzone zztwo')
+check('complete help', completions('help ech'), ['echo'])
 check('complete quoted', completions('cat "' + cdir + '/sf'), [cdir + '/sfile'])
 check('complete ~user', '~root/' in completions('ls ~roo'), true)
 check('complete fuzzy', completions('cat ' + cdir + '/dwn'), [cdir + '/Downloads/'])

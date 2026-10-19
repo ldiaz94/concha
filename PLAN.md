@@ -147,6 +147,13 @@ made.
   (it was `/etc/localtime`), `TZDIR` is looked in for a name, `TZ`
   that names no file is read as a POSIX rule (`EST5EDT,M3.2.0,M11.1.0`;
   it was UTC), and an abbreviation is no longer cut to 7 bytes.
+- **type and help**, two builtins the Pascal lacked: `type name`
+  says what a command word is and where a procedure was declared;
+  `help name` prints a procedure's heading and the comment above it,
+  or a builtin's usage. They are in `-q words` and completion too.
+  So that help finds a procedure's file wherever the shell has gone
+  since, an error in `~/.concharc` names it in full
+  (`/home/luis/.concharc:12`, it was `.concharc:12`).
 
 ## The handover
 

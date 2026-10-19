@@ -1604,6 +1604,239 @@ begin
     return 0, nil;
 end;
 
+(* ---------------------------------------------------- type and help *)
+
+(* Where the procedure def was declared, its file and line, added to b. *)
+proc declared(var b: Buf.Buf; def: ^Csyntax.Stmt);
+begin
+    if LEN(def^.path) = 0 then
+        Buf.str(b, "typed in");
+    else
+        Fmt.write(b, "{}:{}", [Fmt.str(def^.path), Fmt.int(def^.line)]);
+    end;
+end;
+
+(* Are paths a and b one file, as a directory reached by a symbolic
+   link, /bin for /usr/bin, makes them? *)
+proc sameFile(a, b: []U8): BOOL;
+var x, y: Sys.Info; ex, ey: INT;
+begin
+    x, ex := Sys.info(a);
+    y, ey := Sys.info(b);
+    return (ex = 0) and (ey = 0) and (x.dev = y.dev) and (x.ino = y.ino);
+end;
+
+(* What name can be, a line for each: a keyword, which starts a
+   statement; then, in the order a command looks for them, a procedure,
+   a builtin and each program along PATH, so that the first of these is
+   the one that runs and the rest are shadowed; and last a builtin
+   routine, which a call names, not a command. A program reached twice
+   by PATH, through a link, is said once. Nothing is written, and false
+   returned, if it is none of them. *)
+proc typeName(name: []U8): BOOL;
+var def: ^Csyntax.Stmt; b: Buf.Buf; seen: Names.Vec; prev: [][]U8; path, dir, f: []U8; i, k: INT; found, more, again: BOOL;
+begin
+    found := false;
+    for i := 0 to LEN(Csyntax.Keywords) - 1 do
+        if name = Csyntax.Keywords[i] then
+            Ccore.put(1, Ccore.text("{}: keyword\n", [Fmt.str(name)]));
+            found := true;
+        end;
+    end;
+    def := Cvars.findProc(name);
+    if def # nil then
+        Buf.init(b, Ccore.temps);
+        Buf.str(b, name);
+        if def^.isFunc then Buf.str(b, ": function, "); else Buf.str(b, ": procedure, "); end;
+        declared(b, def);
+        Buf.add(b, '\n');
+        Ccore.put(1, Buf.bytes(b));
+        found := true;
+    end;
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+        if name = Csyntax.CmdBuiltins[i].name then
+            Ccore.put(1, Ccore.text("{}: builtin, {}\n", [Fmt.str(name), Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
+            found := true;
+        end;
+    end;
+    if Str.find(name, "/") >= 0 then
+        if Ccomplete.runs(name) then
+            Ccore.put(1, Ccore.text("{}: {}\n", [Fmt.str(name), Fmt.str(name)]));
+            found := true;
+        end;
+    elsif LEN(name) > 0 then
+        Names.init(seen, Ccore.temps);
+        path := Cvars.searchPath();
+        more := true;
+        while more do
+            dir, path, more := Str.cut(path, ":");
+            if LEN(dir) = 0 then dir := "."; end;
+            Buf.init(b, Ccore.temps);    (* a new one for each, as seen keeps them *)
+            Fmt.write(b, "{}/{}", [Fmt.str(dir), Fmt.str(name)]);
+            f := Buf.bytes(b);
+            if Ccomplete.runs(f) then
+                again := false;
+                prev := Names.all(seen);
+                for k := 0 to LEN(prev) - 1 do
+                    if sameFile(f, prev[k]) then again := true; end;
+                end;
+                if not again then
+                    Ccore.put(1, Ccore.text("{}: {}\n", [Fmt.str(name), Fmt.str(f)]));
+                    Names.push(seen, f);
+                    found := true;
+                end;
+            end;
+        end;
+    end;
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do
+        if name = Csyntax.Builtins[i].name then
+            Ccore.put(1, Ccore.text("{}: builtin routine, {}\n", [Fmt.str(name), Fmt.str(Csyntax.Builtins[i].usage)]));
+            found := true;
+        end;
+    end;
+    return found;
+end;
+
+(* type name ...: what each name is; 1 if any is nothing. *)
+proc typeNames(a: []Ccore.Val): INT;
+var name: []U8; k, r: INT;
+begin
+    r := 0;
+    for k := 1 to LEN(a) - 1 do
+        name := Ccore.bytes(Ccore.toStr(a[k]));
+        if not typeName(name) then
+            complain(Ccore.text("{}: not found\n", [Fmt.str(name)]));
+            r := 1;
+        end;
+    end;
+    return r;
+end;
+
+(* The comment just above line l of the file path, a line for each of
+   its lines, trimmed, without its // or braces; "" if there is none. It
+   is a run of // lines, or a { ... } that opens its own line and closes
+   on the line above. *)
+proc commentAbove(path: []U8; l: INT): []U8;
+var b, out: Buf.Buf; ls: Names.Vec; a: [][]U8; s, rest: []U8; i, j, k: INT; more: BOOL;
+begin
+    if (LEN(path) = 0) or (l < 2) then return ""; end;
+    Buf.init(b, Ccore.temps);
+    if Ccore.readFile(path, b) < 0 then return ""; end;
+    Names.init(ls, Ccore.temps);
+    rest := Buf.bytes(b);
+    more := true;
+    k := 0;
+    while more and (k < l - 1) do
+        s, rest, more := Str.cut(rest, "\n");
+        Names.push(ls, Str.trim(s));
+        INC(k);
+    end;
+    a := Names.all(ls);
+    if LEN(a) < l - 1 then return ""; end;
+    i := l - 2;
+    j := i;
+    if Str.hasPrefix(a[i], "//") then
+        while (j > 0) and Str.hasPrefix(a[j - 1], "//") do DEC(j); end;
+        for k := j to i do a[k] := a[k][2..LEN(a[k])]; end;
+    elsif Str.hasSuffix(a[i], "}") then
+        while (j >= 0) and (Str.find(a[j], "{") < 0) do DEC(j); end;
+        if (j < 0) or not Str.hasPrefix(a[j], "{") then return ""; end;
+        a[i] := a[i][0..LEN(a[i]) - 1];
+        a[j] := a[j][1..LEN(a[j])];
+    else
+        return "";
+    end;
+    Buf.init(out, Ccore.temps);
+    for k := j to i do
+        Buf.str(out, Str.trim(a[k]));
+        Buf.add(out, '\n');
+    end;
+    return Buf.bytes(out);
+end;
+
+(* help names a procedure: its heading, where it is, and the comment
+   above it. *)
+proc helpProc(def: ^Csyntax.Stmt);
+var b: Buf.Buf; rest, ln: []U8;
+begin
+    Buf.init(b, Ccore.temps);
+    if def^.isFunc then Buf.str(b, "function "); else Buf.str(b, "procedure "); end;
+    Buf.str(b, def^.s);
+    if LEN(def^.params) > 0 then
+        Buf.add(b, '(');
+        Str.join(b, def^.params, ", ");
+        Buf.add(b, ')');
+    end;
+    Buf.str(b, ", ");
+    declared(b, def);
+    Buf.add(b, '\n');
+    rest := commentAbove(def^.path, def^.line);
+    while LEN(rest) > 0 do
+        ln, rest, _ := Str.cut(rest, "\n");
+        if LEN(ln) > 0 then Buf.str(b, "  "); end;
+        Buf.str(b, ln);
+        Buf.add(b, '\n');
+    end;
+    Ccore.put(1, Buf.bytes(b));
+end;
+
+(* help names a builtin, or a keyword: its usage. *)
+proc helpBuiltin(name: []U8): BOOL;
+var i: INT;
+begin
+    for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+        if name = Csyntax.CmdBuiltins[i].name then
+            Ccore.put(1, Ccore.text("{}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
+            return true;
+        end;
+    end;
+    for i := 0 to LEN(Csyntax.Builtins) - 1 do
+        if name = Csyntax.Builtins[i].name then
+            Ccore.put(1, Ccore.text("{}\n", [Fmt.str(Csyntax.Builtins[i].usage)]));
+            return true;
+        end;
+    end;
+    for i := 0 to LEN(Csyntax.Keywords) - 1 do
+        if name = Csyntax.Keywords[i] then
+            Ccore.put(1, Ccore.text("{}: keyword, see concha(1)\n", [Fmt.str(name)]));
+            return true;
+        end;
+    end;
+    return false;
+end;
+
+(* help: the builtins and how each is used. help name ...: a
+   procedure's heading and the comment above it, or a builtin's usage;
+   1 if any name is neither. *)
+proc help(a: []Ccore.Val): INT;
+var def: ^Csyntax.Stmt; name: []U8; i, k, r: INT;
+begin
+    if LEN(a) = 1 then
+        Ccore.put(1, "Commands:\n");
+        for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
+            Ccore.put(1, Ccore.text("  {}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
+        end;
+        Ccore.put(1, "Routines:\n");
+        for i := 0 to LEN(Csyntax.Builtins) - 1 do
+            Ccore.put(1, Ccore.text("  {}\n", [Fmt.str(Csyntax.Builtins[i].usage)]));
+        end;
+        Ccore.put(1, "help name for a procedure; concha(1) and concha-tutorial(7) for the rest.\n");
+        return 0;
+    end;
+    r := 0;
+    for k := 1 to LEN(a) - 1 do
+        name := Ccore.bytes(Ccore.toStr(a[k]));
+        def := Cvars.findProc(name);
+        if def # nil then
+            helpProc(def);
+        elsif not helpBuiltin(name) then
+            complain(Ccore.text("{}: no help; is it a program? man {}\n", [Fmt.str(name), Fmt.str(name)]));
+            r := 1;
+        end;
+    end;
+    return r;
+end;
+
 proc echo(a: []Ccore.Val);
 var b: Buf.Buf; i, k: INT; nl: BOOL;
 begin
@@ -1688,6 +1921,8 @@ begin
     | "fg": return fgJob(a);
     | "bg": return bgJob(a), nil;
     | "disown": return disownJob(a), nil;
+    | "type": return typeNames(a), nil;
+    | "help": return help(a), nil;
     | else:
     end;
     return 0, nil;

@@ -360,11 +360,12 @@ end;
 (* ~/.concharc, if there is one, run; an error in it ends it, not the
    shell. *)
 proc runRc;
-var b: Buf.Buf;
+var b: Buf.Buf; rc: []U8;
 begin
     Buf.init(b, Heap.heap);
-    if Ccore.readFile(homeFile(".concharc"), b) < 0 then return; end;
-    _ := Cinterp.runText(Buf.bytes(b), ".concharc");
+    rc := homeFile(".concharc");
+    if Ccore.readFile(rc, b) < 0 then return; end;
+    _ := Cinterp.runText(Buf.bytes(b), rc);    (* named in full, for help to find it *)
     Cinterp.recover;
     Ccore.release(top);
 end;

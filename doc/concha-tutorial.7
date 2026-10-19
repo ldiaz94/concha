@@ -156,6 +156,16 @@ vi $(newest('*.log'))
 .Pp
 Variables you create in a procedure are local.
 Globals can be read and assigned.
+.Pp
+A comment just above a procedure is its help:
+.Bd -literal -offset indent
+// make dir and go into it
+procedure mkcd(dir); ...
+
+help mkcd      // its heading, its file and line, the comment
+type ls        // what a name is: procedure, builtin, or programs on PATH
+help           // every builtin, and how it is used
+.Ed
 .Sh 6. FEEDING THE SHELL
 The Bourne
 .Cm "while read"
@@ -317,6 +327,7 @@ to turn all colour off.
 .It Cm "set -o pipefail" Ta Cm "pipefail := true"
 .It Cm "exit 1" Ta Cm "halt(1)"
 .It Cm ". file" Ta Cm "source file"
+.It Cm "type -a cmd" Ta Cm "type cmd"
 .El
 .Sh EXAMPLES
 Short commented scripts, each showing a few features, are installed in

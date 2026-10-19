@@ -16,7 +16,7 @@
    Depends on Ccore for the values, the errors and where they are. Left
    out: what any of it means, which is Cinterp's. *)
 module Csyntax;
-import Heap, Rt, Buf, Fmt, Ccore, Parts := Vec(Part), Exprs := Vec(^Expr), Stmts := Vec(^Stmt), Words := Vec(Word), Redirs := Vec(Redir), Cmds := Vec(^Cmd), Pipes := Vec(Pipe), Arms := Vec(Arm), Names := Vec([]U8), Items := Vec(^OutItem), Refs := Vec(Ref), Heres := Vec(Here);
+import Heap, Rt, Sys, Buf, Fmt, Ccore, Parts := Vec(Part), Exprs := Vec(^Expr), Stmts := Vec(^Stmt), Words := Vec(Word), Redirs := Vec(Redir), Cmds := Vec(^Cmd), Pipes := Vec(Pipe), Arms := Vec(Arm), Names := Vec([]U8), Items := Vec(^OutItem), Refs := Vec(Ref), Heres := Vec(Here);
 
 type
     (* A word of a command, or an interpolated string, is parsed into
@@ -194,7 +194,9 @@ const
         {name: "jobs", usage: "jobs"},
         {name: "fg", usage: "fg [job]"},
         {name: "bg", usage: "bg [job]"},
-        {name: "disown", usage: "disown [job]"}
+        {name: "disown", usage: "disown [job]"},
+        {name: "type", usage: "type name ..."},
+        {name: "help", usage: "help [name ...]"}
     ];
 
     Keywords*: [][]U8 = [
@@ -1423,6 +1425,17 @@ begin
     return blk, nil;
 end;
 
+(* The file being parsed, from the root, so that type and help still
+   find a procedure's file after a cd. *)
+proc fullSrcName: []U8;
+var dir: []U8; err: INT;
+begin
+    if (LEN(srcName) = 0) or (srcName[0] = '/') then return srcName; end;
+    dir, err := Sys.workDir();
+    if err < 0 then return srcName; end;
+    return Ccore.perm(Ccore.text("{}/{}", [Fmt.str(dir), Fmt.str(srcName)]));
+end;
+
 (* A procedure or a function, from after its keyword. Its body is a block
    of its var declarations, then the block between begin and end. *)
 proc parseProc(isFunc: BOOL): (^Stmt, ERROR);
@@ -1430,6 +1443,7 @@ var s, pre, x: ^Stmt; o, up: ^OutItem; ps: Names.Vec; v: Stmts.Vec;
 begin
     s := newStmt(sProc);
     s^.isFunc := isFunc;
+    s^.path := fullSrcName();
     try blank(false);
     s^.col := colOf(pos);
     s^.s := try name();

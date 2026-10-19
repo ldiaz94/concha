@@ -6,7 +6,8 @@
    along PATH. An argument asks the user's complete function first,
    which the caller hands in (Asker); if it has no answer, the
    command's completion file, concha-complete(5); and if there is none,
-   an argument of cd completes a directory and anything else a path.
+   an argument of cd completes a directory, one of type or help a
+   command word, and anything else a path.
    When nothing starts with the word, names that hold its letters in
    order will do, ranked by Cfuzzy, best first.
 
@@ -103,7 +104,7 @@ begin
 end;
 
 (* Is the file f a program this user may run? *)
-proc runs(f: []U8): BOOL;
+proc runs*(f: []U8): BOOL;
 begin
     return (Cglob.pathKind(f) = Cglob.file) and (Sys.access(f, {Sys.executing}) = 0);
 end;
