@@ -27,8 +27,9 @@ is the port before this one, and the model for it.
   `PLAN.md` lists it as meant.
 - Modules keep the Pascal units' jobs and order, each named with a `C`:
   `Ccore`, `Csyntax`, `Cedit`, `Cinterp`, `Concha`; `Cfuzzy`
-  and `Czone` are what the Pascal took from outside (fuzzy(3), hora(3)),
-  and `Cvars`, `Cglob`, `Cclock` and `Ccomplete` the parts of
+  is what the Pascal took from fuzzy(3), and local time, hora(3)'s
+  part, is rzone's `Zone` (`~/r/rzone`, by `-I`);
+  `Cvars`, `Cglob`, `Cclock` and `Ccomplete` are the parts of
   `interp.pas` that depend on the rest one way only.
 - Idiomatic raz, not Pascal transcribed: an error is an `ERROR`
   passed on with `try`, strings are `[]U8`, growable arrays are `Vec`,

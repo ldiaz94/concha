@@ -1,15 +1,14 @@
 (* Cclock: an instant as text, for time(): a small strftime.
 
-   The date is the local clock's, its offset and abbreviation at the
-   instant from Czone. Days are counted from 1970-01-01 and made a
-   civil date after Howard Hinnant's days_from_civil: years start in
-   March, so the leap day falls last, and eras of 400 years repeat
-   exactly. Instants before 1970 count too.
+   The date and time are the local clock's, from rzone's Zone, which
+   reads the zone TZ names as the C library does and works out the
+   date the clock shows, its offset and its abbreviation. Instants
+   before 1970 count too.
 
-   Depends on Ccore for the arena and errors, and on Czone for the
-   zone. Left out: the locale; names are English. *)
+   Depends on Ccore for the arena and errors, and on Zone for the
+   clock. Left out: the locale; names are English. *)
 module Cclock;
-import Buf, Str, Fmt, Ccore, Czone;
+import Buf, Str, Fmt, Ccore, Zone;
 
 const
     DayNames: [][]U8 = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -17,32 +16,6 @@ const
         "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
         "November", "December"
     ];
-
-(* x div y, rounded down rather than toward zero. *)
-proc floorDiv(x, y: I64): I64;
-var q: I64;
-begin
-    q := x div y;
-    if (x mod y # 0) and ((x < 0) # (y < 0)) then DEC(q); end;
-    return q;
-end;
-
-(* The year, month and day of the day days after 1970-01-01. *)
-proc civilDate(days: I64): (I64, I64, I64);
-var era, doe, yoe, doy, mp, y, m, d: I64;
-begin
-    days := days + 719468;
-    era := floorDiv(days, 146097);
-    doe := days - era * 146097;
-    yoe := (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365;
-    doy := doe - (365 * yoe + yoe div 4 - yoe div 100);
-    mp := (5 * doy + 2) div 153;
-    d := doy - (153 * mp + 2) div 5 + 1;
-    if mp < 10 then m := mp + 3; else m := mp - 9; end;
-    y := yoe + era * 400;
-    if m <= 2 then INC(y); end;
-    return y, m, d;
-end;
 
 (* v in decimal added to b, at least w digits wide, padded with pad. *)
 proc num(var b: Buf.Buf; v: I64; w: INT; pad: U8);
@@ -59,15 +32,12 @@ end;
 (* fmt with the instant ms, milliseconds since 1970, in the local time
    zone, in the arena. *)
 proc format*(fmt: []U8; ms: I64): ([]U8, ERROR);
-var b: Buf.Buf; abbr: []U8; secs, t, days, sod, y, m, d, off: I64; i, wd, zoff: INT; c: U8;
+var b: Buf.Buf; tm: Zone.Time; secs: I64; i, off: INT; c: U8;
 begin
-    secs := floorDiv(ms, 1000);
-    zoff, abbr := Czone.at(secs);
-    t := secs + zoff;
-    days := floorDiv(t, 86400);
-    sod := t - days * 86400;
-    y, m, d := civilDate(days);
-    wd := INT(days + 4 - floorDiv(days + 4, 7) * 7);    (* 1970-01-01 was a Thursday *)
+    (* whole seconds, rounded down, so that -1 ms is 23:59:59 the day before *)
+    secs := ms div 1000;
+    if ms mod 1000 < 0 then DEC(secs); end;
+    tm := Zone.local(secs);
     Buf.init(b, Ccore.temps);
     i := 0;
     while i < LEN(fmt) do
@@ -81,21 +51,21 @@ begin
         c := fmt[i];
         INC(i);
         match c of
-        | 'Y': num(b, y, 4, '0');
-        | 'y': num(b, y mod 100, 2, '0');
-        | 'm': num(b, m, 2, '0');
-        | 'd': num(b, d, 2, '0');
-        | 'e': num(b, d, 2, ' ');
-        | 'H': num(b, sod div 3600, 2, '0');
-        | 'M': num(b, sod div 60 mod 60, 2, '0');
-        | 'S': num(b, sod mod 60, 2, '0');
-        | 'a': Buf.str(b, DayNames[wd][0..3]);
-        | 'A': Buf.str(b, DayNames[wd]);
-        | 'b': Buf.str(b, MonthNames[m - 1][0..3]);
-        | 'B': Buf.str(b, MonthNames[m - 1]);
+        | 'Y': num(b, tm.year, 4, '0');
+        | 'y': num(b, tm.year mod 100, 2, '0');
+        | 'm': num(b, tm.month, 2, '0');
+        | 'd': num(b, tm.day, 2, '0');
+        | 'e': num(b, tm.day, 2, ' ');
+        | 'H': num(b, tm.hour, 2, '0');
+        | 'M': num(b, tm.minute, 2, '0');
+        | 'S': num(b, tm.second, 2, '0');
+        | 'a': Buf.str(b, DayNames[tm.weekday][0..3]);
+        | 'A': Buf.str(b, DayNames[tm.weekday]);
+        | 'b': Buf.str(b, MonthNames[tm.month - 1][0..3]);
+        | 'B': Buf.str(b, MonthNames[tm.month - 1]);
         | 's': num(b, secs, 1, '0');
         | 'z':
-            off := zoff div 60;
+            off := tm.offset div 60;
             if off < 0 then
                 Buf.add(b, '-');
                 off := -off;
@@ -104,20 +74,20 @@ begin
             end;
             num(b, off div 60, 2, '0');
             num(b, off mod 60, 2, '0');
-        | 'Z': Buf.str(b, abbr);
+        | 'Z': Buf.str(b, tm.abbr);
         | 'F':
-            num(b, y, 4, '0');
+            num(b, tm.year, 4, '0');
             Buf.add(b, '-');
-            num(b, m, 2, '0');
+            num(b, tm.month, 2, '0');
             Buf.add(b, '-');
-            num(b, d, 2, '0');
+            num(b, tm.day, 2, '0');
         | 'T', 'R':
-            num(b, sod div 3600, 2, '0');
+            num(b, tm.hour, 2, '0');
             Buf.add(b, ':');
-            num(b, sod div 60 mod 60, 2, '0');
+            num(b, tm.minute, 2, '0');
             if c = 'T' then
                 Buf.add(b, ':');
-                num(b, sod mod 60, 2, '0');
+                num(b, tm.second, 2, '0');
             end;
         | '%': Buf.add(b, '%');
         | else: return "", Ccore.fail(Ccore.text("unknown time format %{}", [Fmt.char(c)]));

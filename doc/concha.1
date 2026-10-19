@@ -1053,12 +1053,21 @@ and
 and
 .Ql \&%% .
 Any other is an error.
-The zone is read once, at startup, from
+The zone is read once, at the first call, from
 .Ev TZ
-(in its
-.Ql :name
-form) or
-.Pa /etc/localtime .
+as the C library reads it: unset,
+.Pa /etc/localtime ;
+empty, UTC; otherwise a file, a path or a name such as
+.Ql Europe/London
+under
+.Ev TZDIR
+or
+.Pa /usr/share/zoneinfo ,
+a leading
+.Ql \&:
+dropped; failing that, a POSIX rule such as
+.Ql EST5EDT,M3.2.0,M11.1.0 ;
+and UTC for anything that doesn't read.
 .El
 .Pp
 .Fn getenv
@@ -1585,8 +1594,13 @@ is searched.
 The time zone for
 .Fn time ,
 as
-.Ql :Europe/London ;
-read at startup.
+.Ql Europe/London
+or a POSIX rule; read at its first call.
+.It Ev TZDIR
+Where
+.Ev TZ
+names a zone file, if not
+.Pa /usr/share/zoneinfo .
 .It Ev TERM
 A value of
 .Cm dumb ,

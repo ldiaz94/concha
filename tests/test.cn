@@ -526,6 +526,7 @@ check('time leap day', utc('%Y%m%d %b %B %e %y', 951782400000), '20000229 Feb Fe
 check('time before epoch', utc('%F %T %a', -1), '1969-12-31 23:59:59 Wed')
 check('time seconds and short forms', utc('%s %R %T %%', 1790974296368), '1790974296 20:51 20:51:36 %')
 check('time zone', `env TZ=:America/New_York $cn -c 'write(time("%T %Z %z", 0))'`, '19:00:00 EST -0500')
+check('time zone rule', `env TZ=XST5XDT,M3.2.0,M11.1.0 $cn -c 'write(time("%F %T %Z %z", 1790974296368))'`, '2026-10-02 16:51:36 XDT -0400')
 check('time unknown', `$cn -c 'time("%Q")' 2>&1`, 'concha: 1: unknown time format %Q')
 check('time now', time('%F') = `date +%F`, true)
 check('now ticks', (now() > 1700000000000) and (now() - now() <= 0), true)

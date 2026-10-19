@@ -1,6 +1,8 @@
-# concha, in raz. The program builds with the raz on PATH, which must be
-# the version it is written for, RAZVERSION: make warns of any other. Its
-# tarball is on raz's website, at download/raz-$(RAZVERSION)-linux-x86_64.tar.gz.
+# concha, in raz, over rzone (local time), which it reaches with -I; rzone
+# is a sibling of concha's in ~/r, or wherever RZONE says. The program
+# builds with the raz on PATH, which must be the version it is written
+# for, RAZVERSION: make warns of any other. Its tarball is on raz's
+# website, at download/raz-$(RAZVERSION)-linux-x86_64.tar.gz.
 # A build from raz's sources after a release, 0.15.0-1-g7898828, is that
 # release's.
 #
@@ -24,6 +26,9 @@ ifneq "$(firstword $(subst -, ,$(subst $(comma),,$(word 2,$(shell $(RAZ) --versi
 $(warning concha is written for raz $(RAZVERSION), from $(RAZSITE); $(RAZ) is $(or $(shell $(RAZ) --version 2>/dev/null),not found))
 endif
 
+RZONE ?= ../rzone
+INC = -I $(RZONE)/src
+
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man
@@ -34,14 +39,14 @@ EXAMPLES = $(wildcard examples/*.cn) examples/concharc
 
 all: build/concha
 
-build/concha: $(SRC)
+build/concha: $(SRC) $(RZONE)/src/Zone.raz
 	@mkdir -p build
-	$(RAZ) -Werror -o build/concha src/Concha.raz
+	$(RAZ) -Werror $(INC) -o build/concha src/Concha.raz
 
 modules: $(SRC)
 	@mkdir -p build/modules
 	@for f in $(SRC); do \
-	    echo $$f; $(RAZ) -Werror -o build/modules/$$(basename $$f .raz) $$f || exit 1; \
+	    echo $$f; $(RAZ) -Werror $(INC) -o build/modules/$$(basename $$f .raz) $$f || exit 1; \
 	done
 
 test: build/concha man

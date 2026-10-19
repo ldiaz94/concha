@@ -28,6 +28,8 @@ before it is started, not after.
       went. Checked against fuzzy(3) on 60,000 pairs, and against hora
       at 10,000 instants in every zone, fat and slim, and at every hour
       of DST years in zones with footers made for it.
+      Later `Czone` went, for rzone's `Zone` (see the differences
+      below).
 - [x] 5. `Cedit`: the line editor, history, highlighting, the menu.
       Raw mode is `Sys.rawMode`, which turns OPOST off as the Pascal
       didn't: a new line written then is `\r\n`. The Pascal's timed
@@ -140,6 +142,11 @@ made.
 - **ctrl-x ctrl-e's editor**, stopped with Ctrl-Z or not started for
   want of a fork, ends the edit with the line as the file holds it;
   the Pascal dropped the line.
+- **Local time is rzone's.** `Czone` gave way to `~/r/rzone`'s
+  `Zone`, which reads `TZ` as the C library does: `TZ` empty is UTC
+  (it was `/etc/localtime`), `TZDIR` is looked in for a name, `TZ`
+  that names no file is read as a POSIX rule (`EST5EDT,M3.2.0,M11.1.0`;
+  it was UTC), and an abbreviation is no longer cut to 7 bytes.
 
 ## The handover
 
