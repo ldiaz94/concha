@@ -827,6 +827,8 @@ lines, or a
 .Ql { ... }
 that opens its own line.
 For a builtin, print how it is used; for a keyword, point here.
+On a terminal, keywords are bold and names blue, as the command line
+paints them.
 The status is 1 if any
 .Ar name
 is neither.
@@ -878,6 +880,12 @@ and last a builtin routine, which a call names rather than a command.
 A program that
 .Ev PATH
 reaches twice, through a symbolic link, is listed once.
+On a terminal, a keyword is bold, a name blue and a program's path
+green; colour follows
+.Ev NO_COLOR
+and
+.Ev TERM
+as messages do.
 The status is 1 if any
 .Ar name
 is none of them.

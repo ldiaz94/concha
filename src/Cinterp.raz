@@ -1606,6 +1606,42 @@ end;
 
 (* ---------------------------------------------------- type and help *)
 
+(* type and help's colours, as the command line paints the same words:
+   a keyword bold, a name that runs blue, and a program's path green,
+   as Tab's list shows a program. *)
+const
+    tKeyword = "1";
+    tName = "34";
+    tProgram = "32";
+
+(* Are type and help in colour? When messages are, and standard output
+   is a terminal too, so that type ls > f stays plain. *)
+proc tinted: BOOL;
+begin
+    return Ccore.opts^.colour and Sys.isTerminal(1);
+end;
+
+(* s added to b, in colour (an SGR code) when type and help are in colour. *)
+proc tint(var b: Buf.Buf; colour, s: []U8);
+begin
+    if tinted() then
+        Fmt.write(b, "\x1b[{}m{}\x1b[0m", [Fmt.str(colour), Fmt.str(s)]);
+    else
+        Buf.str(b, s);
+    end;
+end;
+
+(* A builtin's usage, cd [dir] or split(s[, sep]), added to b with its
+   name painted. *)
+proc tintUsage(var b: Buf.Buf; u: []U8);
+var i: INT;
+begin
+    i := 0;
+    while (i < LEN(u)) and (u[i] # ' ') and (u[i] # '(') do INC(i); end;
+    tint(b, tName, u[0..i]);
+    Buf.str(b, u[i..LEN(u)]);
+end;
+
 (* Where the procedure def was declared, its file and line, added to b. *)
 proc declared(var b: Buf.Buf; def: ^Csyntax.Stmt);
 begin
@@ -1626,6 +1662,18 @@ begin
     return (ex = 0) and (ey = 0) and (x.dev = y.dev) and (x.ino = y.ino);
 end;
 
+(* type's line for name, a program at path f. *)
+proc program(name, f: []U8);
+var b: Buf.Buf;
+begin
+    Buf.init(b, Ccore.temps);
+    tint(b, tName, name);
+    Buf.str(b, ": ");
+    tint(b, tProgram, f);
+    Buf.add(b, '\n');
+    Ccore.put(1, Buf.bytes(b));
+end;
+
 (* What name can be, a line for each: a keyword, which starts a
    statement; then, in the order a command looks for them, a procedure,
    a builtin and each program along PATH, so that the first of these is
@@ -1639,14 +1687,17 @@ begin
     found := false;
     for i := 0 to LEN(Csyntax.Keywords) - 1 do
         if name = Csyntax.Keywords[i] then
-            Ccore.put(1, Ccore.text("{}: keyword\n", [Fmt.str(name)]));
+            Buf.init(b, Ccore.temps);
+            tint(b, tKeyword, name);
+            Buf.str(b, ": keyword\n");
+            Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
     end;
     def := Cvars.findProc(name);
     if def # nil then
         Buf.init(b, Ccore.temps);
-        Buf.str(b, name);
+        tint(b, tName, name);
         if def^.isFunc then Buf.str(b, ": function, "); else Buf.str(b, ": procedure, "); end;
         declared(b, def);
         Buf.add(b, '\n');
@@ -1655,13 +1706,16 @@ begin
     end;
     for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
         if name = Csyntax.CmdBuiltins[i].name then
-            Ccore.put(1, Ccore.text("{}: builtin, {}\n", [Fmt.str(name), Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
+            Buf.init(b, Ccore.temps);
+            tint(b, tName, name);
+            Fmt.write(b, ": builtin, {}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]);
+            Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
     end;
     if Str.find(name, "/") >= 0 then
         if Ccomplete.runs(name) then
-            Ccore.put(1, Ccore.text("{}: {}\n", [Fmt.str(name), Fmt.str(name)]));
+            program(name, name);
             found := true;
         end;
     elsif LEN(name) > 0 then
@@ -1681,7 +1735,7 @@ begin
                     if sameFile(f, prev[k]) then again := true; end;
                 end;
                 if not again then
-                    Ccore.put(1, Ccore.text("{}: {}\n", [Fmt.str(name), Fmt.str(f)]));
+                    program(name, f);
                     Names.push(seen, f);
                     found := true;
                 end;
@@ -1690,7 +1744,10 @@ begin
     end;
     for i := 0 to LEN(Csyntax.Builtins) - 1 do
         if name = Csyntax.Builtins[i].name then
-            Ccore.put(1, Ccore.text("{}: builtin routine, {}\n", [Fmt.str(name), Fmt.str(Csyntax.Builtins[i].usage)]));
+            Buf.init(b, Ccore.temps);
+            tint(b, tName, name);
+            Fmt.write(b, ": builtin routine, {}\n", [Fmt.str(Csyntax.Builtins[i].usage)]);
+            Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
     end;
@@ -1760,8 +1817,9 @@ proc helpProc(def: ^Csyntax.Stmt);
 var b: Buf.Buf; rest, ln: []U8;
 begin
     Buf.init(b, Ccore.temps);
-    if def^.isFunc then Buf.str(b, "function "); else Buf.str(b, "procedure "); end;
-    Buf.str(b, def^.s);
+    if def^.isFunc then tint(b, tKeyword, "function"); else tint(b, tKeyword, "procedure"); end;
+    Buf.add(b, ' ');
+    tint(b, tName, def^.s);
     if LEN(def^.params) > 0 then
         Buf.add(b, '(');
         Str.join(b, def^.params, ", ");
@@ -1782,45 +1840,55 @@ end;
 
 (* help names a builtin, or a keyword: its usage. *)
 proc helpBuiltin(name: []U8): BOOL;
-var i: INT;
+var b: Buf.Buf; i: INT;
 begin
+    Buf.init(b, Ccore.temps);
     for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
-        if name = Csyntax.CmdBuiltins[i].name then
-            Ccore.put(1, Ccore.text("{}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
-            return true;
+        if name = Csyntax.CmdBuiltins[i].name then tintUsage(b, Csyntax.CmdBuiltins[i].usage); end;
+    end;
+    if b.len = 0 then
+        for i := 0 to LEN(Csyntax.Builtins) - 1 do
+            if name = Csyntax.Builtins[i].name then tintUsage(b, Csyntax.Builtins[i].usage); end;
         end;
     end;
-    for i := 0 to LEN(Csyntax.Builtins) - 1 do
-        if name = Csyntax.Builtins[i].name then
-            Ccore.put(1, Ccore.text("{}\n", [Fmt.str(Csyntax.Builtins[i].usage)]));
-            return true;
+    if b.len = 0 then
+        for i := 0 to LEN(Csyntax.Keywords) - 1 do
+            if name = Csyntax.Keywords[i] then
+                tint(b, tKeyword, name);
+                Buf.str(b, ": keyword, see concha(1)");
+            end;
         end;
     end;
-    for i := 0 to LEN(Csyntax.Keywords) - 1 do
-        if name = Csyntax.Keywords[i] then
-            Ccore.put(1, Ccore.text("{}: keyword, see concha(1)\n", [Fmt.str(name)]));
-            return true;
-        end;
-    end;
-    return false;
+    if b.len = 0 then return false; end;
+    Buf.add(b, '\n');
+    Ccore.put(1, Buf.bytes(b));
+    return true;
 end;
 
 (* help: the builtins and how each is used. help name ...: a
    procedure's heading and the comment above it, or a builtin's usage;
    1 if any name is neither. *)
 proc help(a: []Ccore.Val): INT;
-var def: ^Csyntax.Stmt; name: []U8; i, k, r: INT;
+var b: Buf.Buf; def: ^Csyntax.Stmt; name: []U8; i, k, r: INT;
 begin
     if LEN(a) = 1 then
-        Ccore.put(1, "Commands:\n");
+        Buf.init(b, Ccore.temps);
+        tint(b, tKeyword, "Commands:");
+        Buf.add(b, '\n');
         for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do
-            Ccore.put(1, Ccore.text("  {}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]));
+            Buf.str(b, "  ");
+            tintUsage(b, Csyntax.CmdBuiltins[i].usage);
+            Buf.add(b, '\n');
         end;
-        Ccore.put(1, "Routines:\n");
+        tint(b, tKeyword, "Routines:");
+        Buf.add(b, '\n');
         for i := 0 to LEN(Csyntax.Builtins) - 1 do
-            Ccore.put(1, Ccore.text("  {}\n", [Fmt.str(Csyntax.Builtins[i].usage)]));
+            Buf.str(b, "  ");
+            tintUsage(b, Csyntax.Builtins[i].usage);
+            Buf.add(b, '\n');
         end;
-        Ccore.put(1, "help name for a procedure; concha(1) and concha-tutorial(7) for the rest.\n");
+        Buf.str(b, "help name for a procedure; concha(1) and concha-tutorial(7) for the rest.\n");
+        Ccore.put(1, Buf.bytes(b));
         return 0;
     end;
     r := 0;
