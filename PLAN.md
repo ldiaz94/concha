@@ -161,7 +161,9 @@ made.
 2. [ ] **Daily use.** The raz concha is the shell of one terminal for
    a week: `~/.concharc`, the prompt, completion, jobs, and the
    scripts under `~/lib` that are concha.
-3. [ ] **Switch.** `make install` into `~/.local/bin`; the Pascal one
+   The switch came first: the raz concha became the shell before this
+   week was done.
+3. [x] **Switch.** (2026-10-19: the raz concha is kept as the shell.) `make install` into `~/.local/bin`; the Pascal one
    kept as `~/.local/bin/concha-fpc` for a while. `man desktop` (`OUR
    OWN: CONCHA, ROBBIE, SAUCE`) says concha is raz, then `make check`
    and `make install` in `~/lib/desktop`. concha-lsp
