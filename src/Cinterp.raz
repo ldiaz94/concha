@@ -1607,12 +1607,16 @@ end;
 (* ---------------------------------------------------- type and help *)
 
 (* type and help's colours, as the command line paints the same words:
-   a keyword bold, a name that runs blue, and a program's path green,
-   as Tab's list shows a program. *)
+   a keyword, and what kind of thing a name is, bold; a name that runs
+   blue; a parameter cyan, as a variable; and a program's path green, as
+   Tab's list shows a program. Where a procedure was declared is
+   magenta, to stand apart from them. *)
 const
     tKeyword = "1";
     tName = "34";
+    tParam = "36";
     tProgram = "32";
+    tPlace = "35";
 
 (* Are type and help in colour? When messages are, and standard output
    is a terminal too, so that type ls > f stays plain. *)
@@ -1631,6 +1635,16 @@ begin
     end;
 end;
 
+(* Where the procedure def was declared, its file and line, added to b. *)
+proc declared(var b: Buf.Buf; def: ^Csyntax.Stmt);
+begin
+    if LEN(def^.path) = 0 then
+        tint(b, tPlace, "typed in");
+    else
+        tint(b, tPlace, Ccore.text("{}:{}", [Fmt.str(def^.path), Fmt.int(def^.line)]));
+    end;
+end;
+
 (* A builtin's usage, cd [dir] or split(s[, sep]), added to b with its
    name painted. *)
 proc tintUsage(var b: Buf.Buf; u: []U8);
@@ -1640,16 +1654,6 @@ begin
     while (i < LEN(u)) and (u[i] # ' ') and (u[i] # '(') do INC(i); end;
     tint(b, tName, u[0..i]);
     Buf.str(b, u[i..LEN(u)]);
-end;
-
-(* Where the procedure def was declared, its file and line, added to b. *)
-proc declared(var b: Buf.Buf; def: ^Csyntax.Stmt);
-begin
-    if LEN(def^.path) = 0 then
-        Buf.str(b, "typed in");
-    else
-        Fmt.write(b, "{}:{}", [Fmt.str(def^.path), Fmt.int(def^.line)]);
-    end;
 end;
 
 (* Are paths a and b one file, as a directory reached by a symbolic
@@ -1689,7 +1693,9 @@ begin
         if name = Csyntax.Keywords[i] then
             Buf.init(b, Ccore.temps);
             tint(b, tKeyword, name);
-            Buf.str(b, ": keyword\n");
+            Buf.str(b, ": ");
+            tint(b, tKeyword, "keyword");
+            Buf.add(b, '\n');
             Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
@@ -1698,7 +1704,9 @@ begin
     if def # nil then
         Buf.init(b, Ccore.temps);
         tint(b, tName, name);
-        if def^.isFunc then Buf.str(b, ": function, "); else Buf.str(b, ": procedure, "); end;
+        Buf.str(b, ": ");
+        if def^.isFunc then tint(b, tKeyword, "function"); else tint(b, tKeyword, "procedure"); end;
+        Buf.str(b, ", ");
         declared(b, def);
         Buf.add(b, '\n');
         Ccore.put(1, Buf.bytes(b));
@@ -1708,7 +1716,9 @@ begin
         if name = Csyntax.CmdBuiltins[i].name then
             Buf.init(b, Ccore.temps);
             tint(b, tName, name);
-            Fmt.write(b, ": builtin, {}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]);
+            Buf.str(b, ": ");
+            tint(b, tKeyword, "builtin");
+            Fmt.write(b, ", {}\n", [Fmt.str(Csyntax.CmdBuiltins[i].usage)]);
             Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
@@ -1746,7 +1756,9 @@ begin
         if name = Csyntax.Builtins[i].name then
             Buf.init(b, Ccore.temps);
             tint(b, tName, name);
-            Fmt.write(b, ": builtin routine, {}\n", [Fmt.str(Csyntax.Builtins[i].usage)]);
+            Buf.str(b, ": ");
+            tint(b, tKeyword, "builtin routine");
+            Fmt.write(b, ", {}\n", [Fmt.str(Csyntax.Builtins[i].usage)]);
             Ccore.put(1, Buf.bytes(b));
             found := true;
         end;
@@ -1814,7 +1826,7 @@ end;
 (* help names a procedure: its heading, where it is, and the comment
    above it. *)
 proc helpProc(def: ^Csyntax.Stmt);
-var b: Buf.Buf; rest, ln: []U8;
+var b: Buf.Buf; rest, ln: []U8; i: INT;
 begin
     Buf.init(b, Ccore.temps);
     if def^.isFunc then tint(b, tKeyword, "function"); else tint(b, tKeyword, "procedure"); end;
@@ -1822,7 +1834,10 @@ begin
     tint(b, tName, def^.s);
     if LEN(def^.params) > 0 then
         Buf.add(b, '(');
-        Str.join(b, def^.params, ", ");
+        for i := 0 to LEN(def^.params) - 1 do
+            if i > 0 then Buf.str(b, ", "); end;
+            tint(b, tParam, def^.params[i]);
+        end;
         Buf.add(b, ')');
     end;
     Buf.str(b, ", ");
