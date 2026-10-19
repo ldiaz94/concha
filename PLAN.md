@@ -154,6 +154,12 @@ made.
   So that help finds a procedure's file wherever the shell has gone
   since, an error in `~/.concharc` names it in full
   (`/home/luis/.concharc:12`, it was `.concharc:12`).
+- **ctrl-r matches fuzzily**, as completion does: a history line
+  matches when the query's letters come in it in order, and the best
+  match by `Cfuzzy`'s score comes first, the newest of equals; ctrl-r
+  goes to the next best, and a line already shown is passed over. The
+  Pascal took the newest line holding the query whole, with the cursor
+  on it; now the cursor is at the end.
 
 ## The handover
 

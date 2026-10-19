@@ -15,11 +15,12 @@
    guess costs a colour, nothing more.
 
    It depends on Ccore for output, temporaries and values, on Sys for
-   the terminal, and on Width for how many columns a character takes.
+   the terminal, on Width for how many columns a character takes, and
+   on Cfuzzy for how well a history line matches a search.
    Left out: a key map of the user's own, and grapheme clusters (an
    emoji joined by a zero-width joiner counts as its parts). *)
 module Cedit;
-import Sys, Heap, Buf, Str, Width, Ccore, Vals := Vec(Ccore.Val), Names := Vec([]U8);
+import Sys, Heap, Buf, Str, Width, Ccore, Cfuzzy, Vals := Vec(Ccore.Val), Names := Vec([]U8);
 
 type
     (* What editLine got. *)
@@ -1097,18 +1098,35 @@ begin
     insert(s[a..n]);
 end;
 
-(* The newest entry from from down that holds q, and where; -1 if
-   none. *)
-proc find(q: []U8; from: INT): (INT, INT);
-var i, k: INT; s: []U8;
+(* Is entry i also a newer one, so a search can pass it over? *)
+proc older(i: INT): BOOL;
+var j: INT;
 begin
-    for i := from to 0 by -1 do
-        s := entry(i);
-        for k := LEN(s) - LEN(q) to 0 by -1 do
-            if s[k..k + LEN(q)] = q then return i, k; end;
+    for j := i + 1 to hist.len - 1 do
+        if entry(j) = entry(i) then return true; end;
+    end;
+    return false;
+end;
+
+(* The search ranks the entries q fuzzily matches by their score, the
+   newest first of equals. The entry after the one numbered f, of score
+   sc, in that order, and its score; the first if f is hist.len, and -1
+   if none. *)
+proc find(q: []U8; f, sc: INT): (INT, INT);
+var i, s, bi, bs: INT; ex: BOOL;
+begin
+    ex := Cfuzzy.exact(q);
+    bi := -1;
+    bs := -1;
+    for i := hist.len - 1 to 0 by -1 do
+        s := Cfuzzy.score(entry(i), q, ex);
+        if (s > bs) and ((f = hist.len) or (s < sc) or (s = sc) and (i < f))
+            and not older(i) then
+            bi := i;
+            bs := s;
         end;
     end;
-    return -1, 0;
+    return bi, bs;
 end;
 
 proc edge(c: U8): BOOL;
@@ -1177,25 +1195,25 @@ begin
     insert(s);
 end;
 
-(* The search: the entry from from down that holds q, if any, into the
-   line, and its number; fi if none. *)
-proc look(q: []U8; from, fi: INT): INT;
-var f, at: INT;
+(* The search: the match for q after the entry numbered f, of score
+   sc, into the line, with its number and score; f and sc if none. *)
+proc look(q: []U8; f, sc: INT): (INT, INT);
+var g, s: INT;
 begin
-    if LEN(q) = 0 then return fi; end;
-    f, at := find(q, from);
-    if f < 0 then return fi; end;
-    setLine(entry(f));
-    cur := at;
-    return f;
+    if LEN(q) = 0 then return f, sc; end;
+    g, s := find(q, f, sc);
+    if g < 0 then return f, sc; end;
+    setLine(entry(g));
+    return g, s;
 end;
 
 (* ctrl-r: the key that ended the search, to be handled as usual. *)
 proc search: INT;
-var q: [128]U8; qn, fi, k: INT; orig: []U8; s: Buf.Buf;
+var q: [128]U8; qn, fi, fs, k: INT; orig: []U8; s: Buf.Buf;
 begin
     qn := 0;
     fi := hist.len;
+    fs := 0;
     orig := Ccore.perm(text());
     defer Str.free(Heap.heap, orig);
     Buf.init(s, Heap.heap);
@@ -1207,11 +1225,11 @@ begin
         show(Buf.bytes(s), "", 0);
         k := getKey();
         match k of
-        | ctrlR: fi := look(q[0..qn], fi - 1, fi);
+        | ctrlR: fi, fs := look(q[0..qn], fi, fs);
         | ctrlH, del:
             if qn > 0 then
                 DEC(qn);
-                fi := look(q[0..qn], hist.len - 1, hist.len);
+                fi, fs := look(q[0..qn], hist.len, 0);
             end;
         | ctrlC, ctrlG:
             setLine(orig);
@@ -1223,11 +1241,7 @@ begin
                     q[qn] := U8(k);
                     INC(qn);
                 end;
-                if fi = hist.len then
-                    fi := look(q[0..qn], hist.len - 1, fi);
-                else
-                    fi := look(q[0..qn], fi, fi);
-                end;
+                fi, fs := look(q[0..qn], hist.len, 0);
             else
                 break;
             end;

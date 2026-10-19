@@ -1208,9 +1208,12 @@ Clear the screen and redraw.
 Move through history.
 Unsubmitted text is kept when you return to the bottom of the history.
 .It Ic ^R
-Search history backwards as you type.
+Search history as you type.
+A line matches when the letters typed appear in it in order, not
+necessarily together, as in completion; the best match comes first,
+the newest of equally good ones.
 .Ic ^R
-again finds an older match,
+again finds the next best,
 .Ic Backspace
 shortens the query,
 .Ic ^G
