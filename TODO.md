@@ -19,3 +19,14 @@ Findings for the user to schedule; not part of PLAN.md.
   variables, the nested body's `end` closes the outer procedure, and
   the outer `begin ... end` runs at the top. `-n` says nothing. A
   nested procedure works only inside the body.
+- No hex formatting and no UTF-8 decoding: there is no `hex` or
+  `format`, and `length`, `ord` and `copy` work on bytes (`ord('─')`
+  is 226). So a script can't write a character as a JSON `\uXXXX`
+  escape; cyk's `test/cast.cn` writes raw UTF-8 instead (2026-10-20).
+- `split('', sep)` gives an empty list, not `['']`, so code that
+  splits text into pieces and counts separators gets -1 for an empty
+  piece. Defensible, but `man concha` doesn't say so (2026-10-20).
+- `$name` in an expression, as in `writeln($f)`, fails with only
+  "expected an expression". The rule (`$` for command words, the bare
+  name in expressions) is right; the message could name it, e.g.
+  "write f, not $f, in an expression" (2026-10-20).
