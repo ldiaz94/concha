@@ -62,3 +62,37 @@ Findings for the user to schedule; not part of PLAN.md.
   case above was found only by adding echo lines until it moved; a
   message on stderr like `script.cn:12: errexit: p() (status 1)`
   would have found it at once (2026-10-23).
+- `args` as a procedure parameter name: `procedure p(want, args)` binds
+  the parameter, but every call then overwrites it with the full
+  argument list (`man concha`: "Every call also receives the full
+  argument list in the local variable args"), so `args` holds `want`
+  and the list flattened; `p('x', ['a','b'])` then `echo $args` prints
+  `x a b`. A parameter named `argv` is untouched (`a b`). The manual
+  never says a parameter may not be called `args`; the call should
+  either bind the declared parameter or `-n` should reject the name
+  (found in desh's `test/run.cn`, 2026-10-23).
+- The stale status after `errexit := false` is not only a capture's: a
+  plain failing command does it too, and any later statement that
+  leaves `status` alone ends the script silently once `errexit := true`
+  is set. Exits 1 after `w`, `next` never printed (2026-10-23):
+
+      errexit := false
+      false
+      errexit := true
+      writeln('w')
+      echo next
+
+  `x := 1` instead of the `writeln` is fine; the exit is at the
+  `writeln` statement, not at the assignment. bash's `set +e; false;
+  set -e` does not exit on re-enabling, and its next command resets
+  `$?`. Seen in lolo's `test/run.cn`.
+- A heredoc inside a backtick capture is refused with "unterminated
+  heredoc" (exit 2), though the same heredoc as a plain command works:
+
+      x := `cat <<EOF
+      hello
+      EOF`
+
+  The reader seems to look for the terminator before the closing
+  backtick is matched. Worked around in lolo's `tools/album.cn` by
+  writing the heredoc to a file and capturing that (2026-10-23).
