@@ -33,3 +33,33 @@ Findings for the user to schedule; not part of PLAN.md.
   "expected an expression". The rule (`$` for command words, the bare
   name in expressions) is right; the message could name it, e.g.
   "write f, not $f, in an expression" (2026-10-20).
+- A failed capture's status outlives `errexit := false`. A function
+  that turns errexit off, captures a failing command and turns it
+  back on leaves `status` at 1 (`Cinterp.raz` `Cvars.setStatus(waitFor(pid))`
+  in the capture), since Pascal statements leave it alone; the next
+  procedure-call statement is an `sCmd` and takes that stale 1 as its
+  own, and `execStmt` ends the script by errexit. Exits 1 after `a`:
+
+      errexit := true
+      function quiet;
+      begin
+        errexit := false
+        result := `false`
+        errexit := true
+      end;
+      procedure p;
+      begin
+        x := quiet()
+      end;
+      echo a
+      p()
+      echo b
+
+  A call to a procedure should give it its own status (0 unless it
+  runs a command that fails), not the last one seen. blick's
+  `test/check.cn` captures with `|| true` instead (2026-10-23).
+- errexit ends a script with no word: no file, line or command. The
+  case above was found only by adding echo lines until it moved; a
+  message on stderr
+  like `script.cn:12: errexit: p() (status 1)` would have found it at
+  once (2026-10-23).
