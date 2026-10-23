@@ -60,6 +60,5 @@ Findings for the user to schedule; not part of PLAN.md.
   `test/check.cn` captures with `|| true` instead (2026-10-23).
 - errexit ends a script with no word: no file, line or command. The
   case above was found only by adding echo lines until it moved; a
-  message on stderr
-  like `script.cn:12: errexit: p() (status 1)` would have found it at
-  once (2026-10-23).
+  message on stderr like `script.cn:12: errexit: p() (status 1)`
+  would have found it at once (2026-10-23).
