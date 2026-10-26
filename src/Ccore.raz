@@ -16,6 +16,7 @@
    never copies text yet to be written. *)
 module Ccore;
 import Sys, Rt, Mem, Heap, Buf, Fmt, Str, Vals := Vec(Val);
+import SYSTEM;
 
 const
     Failed*: ERROR = "failed";
@@ -67,7 +68,7 @@ type
     Where* = record
         line*: INT;    (* 0 when no line is known *)
         col*: INT;    (* the byte column of a syntax error, from 1; 0 for none *)
-        file*: []U8;    (* "" when typed, or given with -c *)
+        file*: []const U8;    (* "" when typed, or given with -c *)
     end;
 
     (* How messages are written *)
@@ -156,7 +157,7 @@ begin
 end;
 
 (* s, copied to the heap for good: what a syntax tree holds. *)
-proc perm*(s: []U8): []U8;
+proc perm*(s: []const U8): []U8;
 var c: []U8; ok: BOOL;
 begin
     c, ok := Str.copy(Heap.heap, s);
@@ -167,7 +168,7 @@ end;
 (* ----------------------------------------------------------- output *)
 
 (* s written whole to fd, unbuffered. *)
-proc put*(fd: INT; s: []U8);
+proc put*(fd: INT; s: []const U8);
 var k: INT;
 begin
     while LEN(s) > 0 do
@@ -188,7 +189,7 @@ begin
 end;
 
 (* The text of f with args, until the next call. *)
-proc text*(f: []U8; args: []Fmt.Arg): []U8;
+proc text*(f: []const U8; args: []Fmt.Arg): []const U8;
 begin
     Buf.reset(scratch);
     Fmt.write(scratch, f, args);
@@ -197,8 +198,8 @@ end;
 
 (* What strerror says, for the errors concha's callers meet; e is the
    errno, positive. Good until the arena's next release. *)
-proc errText*(e: INT): []U8;
-var s: []U8; p: ^U8;
+proc errText*(e: INT): []const U8;
+var s: []const U8; p: ^U8;
 begin
     match e of
     | errNoEnt: return "no such file or directory";
@@ -222,14 +223,14 @@ begin
 end;
 
 (* The message warn kept last, with keepErr. *)
-proc kept*: []U8;
+proc kept*: []const U8;
 begin
     return Buf.bytes(keptMsg);
 end;
 
 (* An error reported, and the work carried on: the head, the place,
    what it concerns if anything, and msg. *)
-proc report(what: []U8; hasWhat: BOOL; msg: []U8);
+proc report(what: []const U8; hasWhat: BOOL; msg: []const U8);
 var n: [20]U8; k: INT;
 begin
     if optsAt.keepErr then
@@ -255,27 +256,27 @@ begin
     put(2, "\n");
 end;
 
-proc warn*(msg: []U8);
+proc warn*(msg: []const U8);
 begin
     report("", false, msg);
 end;
 
 (* warn, of what the message concerns: "what: msg". *)
-proc warnOn*(what, msg: []U8);
+proc warnOn*(what, msg: []const U8);
 begin
     report(what, true, msg);
 end;
 
 (* An error: warned of, and Failed to pass on; in a forked child, the
    end of it, with status 2. *)
-proc fail*(msg: []U8): ERROR;
+proc fail*(msg: []const U8): ERROR;
 begin
     warn(msg);
     if optsAt.inChild then Sys.exit(2); end;
     return Failed;
 end;
 
-proc failOn*(what, msg: []U8): ERROR;
+proc failOn*(what, msg: []const U8): ERROR;
 begin
     warnOn(what, msg);
     if optsAt.inChild then Sys.exit(2); end;
@@ -296,7 +297,7 @@ begin
 end;
 
 (* s, copied to the arena. *)
-proc strVal*(s: []U8): Val;
+proc strVal*(s: []const U8): Val;
 var p: ^U8;
 begin
     p := alloc(LEN(s));
@@ -310,7 +311,7 @@ var a: []Val;
 begin
     a := Vals.all(v);
     if LEN(a) = 0 then return {kind: kList}; end;
-    return {kind: kList, n: LEN(a), p: ^U8(ADR(a[0]))};
+    return {kind: kList, n: LEN(a), p: ^U8(SYSTEM.ADR(a[0]))};
 end;
 
 (* A string's bytes, where they are. *)
@@ -400,7 +401,7 @@ var s: []U8;
 begin
     s := Buf.bytes(b);
     if LEN(s) = 0 then return {kind: kStr}; end;
-    return {kind: kStr, n: LEN(s), p: ADR(s[0])};
+    return {kind: kStr, n: LEN(s), p: SYSTEM.ADR(s[0])};
 end;
 
 (* v as a string. *)
@@ -452,7 +453,7 @@ begin
     return i, r = 1;
 end;
 
-proc kindName*(k: Kind): []U8;
+proc kindName*(k: Kind): []const U8;
 begin
     match k of
     | kNil: return "nil";
@@ -559,7 +560,7 @@ end;
 (* Optimal string alignment: Levenshtein's distance, plus swapping two
    neighbouring letters, so that lenght is 1 from length. Three rows
    (i - 2, i - 1, i); a name longer than DistMax is far from all. *)
-proc distance*(a, b: []U8): INT;
+proc distance*(a, b: []const U8): INT;
 var r0, r1, r2: [DistMax + 1]INT; i, j, cost, best: INT;
 begin
     if (LEN(a) > DistMax) or (LEN(b) > DistMax) then return 3FFFFFFFH; end;
@@ -583,7 +584,7 @@ begin
 end;
 
 (* The file at path added to b: 0, or minus an errno. *)
-proc readFile*(path: []U8; var b: Buf.Buf): INT;
+proc readFile*(path: []const U8; var b: Buf.Buf): INT;
 var fd, k: INT; s: []U8;
 begin
     fd := Sys.openRead(path);
@@ -601,11 +602,11 @@ begin
 end;
 
 begin
-    where := ADR(whereAt);
-    opts := ADR(optsAt);
+    where := SYSTEM.ADR(whereAt);
+    opts := SYSTEM.ADR(optsAt);
     optsAt.showLine := true;
     tempAlloc := {alloc: tempsAlloc, free: tempsFree};
-    temps := ADR(tempAlloc);
+    temps := SYSTEM.ADR(tempAlloc);
     Buf.init(scratch, Heap.heap);
     Buf.init(keptMsg, Heap.heap);
 end Ccore.

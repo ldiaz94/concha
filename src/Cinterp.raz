@@ -21,7 +21,8 @@
    "did you mean". Left out: the command line and the REPL, which are
    Concha's. *)
 module Cinterp;
-import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Cedit, Ccomplete, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]U8);
+import Sys, Rt, Mem, Files, Fmt, Buf, Str, Heap, Ccore, Csyntax, Cvars, Cglob, Cclock, Cedit, Ccomplete, Vals := Vec(Ccore.Val), Jobs := Vec(Job), Stages := Vec(Stage), Ints := Vec(INT), Names := Vec([]const U8);
+import SYSTEM;
 
 const
     MaxSaves = 256;    (* fds saved around a builtin's redirections *)
@@ -29,7 +30,7 @@ const
     HereMax = 32768;    (* a here string the shell writes itself; a longer one, a child *)
 
     (* The signals trap takes: EXIT, which isn't one, and the rest *)
-    TrapNames: [][]U8 = ["EXIT", "HUP", "INT", "QUIT", "TERM", "USR1", "USR2"];
+    TrapNames: [][]const U8 = ["EXIT", "HUP", "INT", "QUIT", "TERM", "USR1", "USR2"];
     TrapSigs: []INT = [0, Sys.sigHup, Sys.sigInt, Sys.sigQuit, Sys.sigTerm, Sys.sigUsr1, Sys.sigUsr2];
     NTrap = LEN(TrapSigs);
 
@@ -77,7 +78,7 @@ type
     Rx = record
         kind: Csyntax.RedirKind;
         fd, fd2: INT;
-        s: []U8;    (* the file, or a here string's text *)
+        s: []const U8;    (* the file, or a here string's text *)
     end;
 
     (* A command's words and redirections, expanded *)
@@ -135,9 +136,9 @@ proc execList(l: []^Csyntax.Stmt): ERROR; forward;
 proc eval(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
 proc runArgs(a: []Ccore.Val): (INT, ERROR); forward;
 proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR); forward;
-proc runText*(text, path: []U8): ERROR; forward;
+proc runText*(text, path: []const U8): ERROR; forward;
 proc reapJobs*; forward;
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL; forward;
+proc complete*(p: []const U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL; forward;
 proc correct(a: []Ccore.Val); forward;
 
 (* ---------------------------------------------------------- signals *)
@@ -353,7 +354,7 @@ begin
 end;
 
 (* A pipe with s to read from it; a child writes a long one. *)
-proc hereFd(s: []U8): (INT, ERROR);
+proc hereFd(s: []const U8): (INT, ERROR);
 var r, w: INT;
 begin
     r, w := Sys.pipe();
@@ -462,7 +463,7 @@ end;
    only until the table next changes. *)
 
 (* A new job of the processes pids, in the group pg: its index. *)
-proc newJob(pids: []INT; pg: INT; name: []U8): INT;
+proc newJob(pids: []INT; pg: INT; name: []const U8): INT;
 var j: ^Job; a: []Job; p: ^INT; e: ^Ended; i, id: INT; ok: BOOL;
 begin
     a := Jobs.all(jobs);
@@ -504,8 +505,8 @@ proc dropJob(k: INT);
 var a: []Job;
 begin
     a := Jobs.all(jobs);
-    Mem.free(Heap.heap, ^U8(ADR(a[k].pids[0])));
-    Mem.free(Heap.heap, ^U8(ADR(a[k].ends[0])));
+    Mem.free(Heap.heap, ^U8(SYSTEM.ADR(a[k].pids[0])));
+    Mem.free(Heap.heap, ^U8(SYSTEM.ADR(a[k].ends[0])));
     Str.free(Heap.heap, a[k].name);
     COPY(a[k..LEN(a) - 1], a[k + 1..LEN(a)]);
     Jobs.resize(jobs, LEN(a) - 1);
@@ -552,10 +553,10 @@ begin
 end;
 
 (* "[id] what name" of job k, on standard error. *)
-proc report(k: INT; what: []U8);
+proc report(k: INT; what: []const U8);
 var j: ^Job; b: Buf.Buf; m: Ccore.Mark;
 begin
-    j := ADR(Jobs.all(jobs)[k]);
+    j := SYSTEM.ADR(Jobs.all(jobs)[k]);
     m := Ccore.mark();
     Buf.init(b, Ccore.temps);
     Fmt.write(b, "[{}] {} {}\n", [Fmt.int(j^.id), Fmt.str(what), Fmt.str(j^.name)]);
@@ -568,7 +569,7 @@ end;
 proc jobStatus(k: INT): INT;
 var j: ^Job; i, st, r: INT; pf: BOOL;
 begin
-    j := ADR(Jobs.all(jobs)[k]);
+    j := SYSTEM.ADR(Jobs.all(jobs)[k]);
     pf := Cvars.flag("pipefail");
     for i := 0 to LEN(j^.ends) - 1 do
         st := exitCode(j^.ends[i]);
@@ -583,7 +584,7 @@ end;
 proc waitJob(k: INT): (INT, ERROR);
 var j: ^Job; e, last: Ended; m: Sys.Mode; r, i, st: INT;
 begin
-    j := ADR(Jobs.all(jobs)[k]);
+    j := SYSTEM.ADR(Jobs.all(jobs)[k]);
     while j^.left > 0 do
         r, e.how, e.n := Sys.wait(-j^.pgid, true);
         if r < 0 then
@@ -631,7 +632,7 @@ end;
 (* Waits for the foreground job of the processes pids, in the group pg.
    When a <(...) leads the group, it may have read the terminal before
    the group had it, and stopped: it is continued. *)
-proc foreground(pids: []INT; pg: INT; name: []U8): (INT, ERROR);
+proc foreground(pids: []INT; pg: INT; name: []const U8): (INT, ERROR);
 begin
     if pg # pids[0] then _ := Sys.kill(-pg, Sys.sigCont); end;
     return waitJob(newJob(pids, pg, name));
@@ -672,7 +673,7 @@ end;
 
 (* The environment of a program the shell runs: its exported globals,
    as NAME=value. *)
-proc buildEnv: [][]U8;
+proc buildEnv: [][]const U8;
 var env: Names.Vec; g: []Cvars.Var; b: Buf.Buf; i: INT;
 begin
     Names.init(env, Ccore.temps);
@@ -692,7 +693,7 @@ end;
 (* For tryExec: the file f run with the arguments av, its name first,
    and the environment ev; a file the kernel can't run (ENOEXEC) is a
    script for /bin/sh. err is why it failed, unless f wasn't there. *)
-proc attempt(f: []U8; av, ev: [][]U8; var err: INT);
+proc attempt(f: []const U8; av, ev: [][]const U8; var err: INT);
 var sh: Names.Vec; e, k: INT;
 begin
     e := -Sys.execve(f, av, ev);
@@ -715,7 +716,7 @@ end;
 (* The program args name run in this process's place, looked for along
    PATH; if it can't be, why not said, and 126 or 127. *)
 proc tryExec(args: []Ccore.Val): INT;
-var words: Names.Vec; av, ev: [][]U8; name, path, dir: []U8; i, err: INT; b: Buf.Buf; slash, more: BOOL;
+var words: Names.Vec; av, ev: [][]const U8; name, path, dir: []const U8; i, err: INT; b: Buf.Buf; slash, more: BOOL;
 begin
     Names.init(words, Ccore.temps);
     for i := 0 to LEN(args) - 1 do Names.push(words, Ccore.bytes(Ccore.toStr(args[i]))); end;
@@ -903,25 +904,25 @@ end;
 
 (* ------------------------------------------------------------ words *)
 
-proc partVal(p: ^Csyntax.Part): (Ccore.Val, ERROR);
-var r: ^Cvars.Var; b: Buf.Buf; h: []U8; ok: BOOL;
+proc partVal(const p: Csyntax.Part): (Ccore.Val, ERROR);
+var r: ^Cvars.Var; b: Buf.Buf; h: []const U8; ok: BOOL;
 begin
-    match p^.kind of
-    | ptLit: return Ccore.strVal(p^.s), nil;
+    match p.kind of
+    | ptLit: return Ccore.strVal(p.s), nil;
     | ptVar:
-        r := Cvars.find(p^.s);
-        if r = nil then return {}, Cvars.undefined(p^.s); end;
+        r := Cvars.find(p.s);
+        if r = nil then return {}, Cvars.undefined(p.s); end;
         return Ccore.temp(r^.v), nil;
-    | ptExpr: return eval(p^.e);
-    | ptCap: return capture(p^.cap);
-    | ptSub: return openSub(p^.cap);
+    | ptExpr: return eval(p.e);
+    | ptCap: return capture(p.cap);
+    | ptSub: return openSub(p.cap);
     | ptHome:
-        if LEN(p^.s) = 0 then return Ccore.strVal(Cvars.home()), nil; end;
-        h, ok := Cvars.userHome(p^.s);
+        if LEN(p.s) = 0 then return Ccore.strVal(Cvars.home()), nil; end;
+        h, ok := Cvars.userHome(p.s);
         if ok then return Ccore.strVal(h), nil; end;
         Buf.init(b, Ccore.temps);    (* no such user *)
         Buf.add(b, '~');
-        Buf.str(b, p^.s);
+        Buf.str(b, p.s);
         return Ccore.bufVal(b), nil;
     end;
 end;
@@ -930,7 +931,7 @@ proc interpolate(parts: []Csyntax.Part): (Ccore.Val, ERROR);
 var b: Buf.Buf; i: INT;
 begin
     Buf.init(b, Ccore.temps);
-    for i := 0 to LEN(parts) - 1 do Buf.str(b, Ccore.bytes(Ccore.toStr(try partVal(ADR(parts[i]))))); end;
+    for i := 0 to LEN(parts) - 1 do Buf.str(b, Ccore.bytes(Ccore.toStr(try partVal(parts[i])))); end;
     return Ccore.bufVal(b), nil;
 end;
 
@@ -938,10 +939,10 @@ end;
    `list` or <(list) unquoted gives a list's items each as a field;
    anything else is one field, or the paths it matches as a pattern. *)
 proc expandWord(w: Csyntax.Word; var out: Vals.Vec): ERROR;
-var v: Ccore.Val; plain, pat: Buf.Buf; s: []U8; i, k: INT; wild: BOOL;
+var v: Ccore.Val; plain, pat: Buf.Buf; s: []const U8; i, k: INT; wild: BOOL;
 begin
     if (LEN(w) = 1) and not w[0].quoted and (w[0].kind >= Csyntax.ptVar) and (w[0].kind # Csyntax.ptHome) then
-        v := try partVal(ADR(w[0]));
+        v := try partVal(w[0]);
         if v.kind = Ccore.kList then
             for i := 0 to INT(v.n) - 1 do Vals.push(out, Ccore.items(v)[i]); end;
         else
@@ -952,7 +953,7 @@ begin
     Buf.init(plain, Ccore.temps);
     Buf.init(pat, Ccore.temps);
     for i := 0 to LEN(w) - 1 do
-        s := Ccore.bytes(Ccore.toStr(try partVal(ADR(w[i]))));
+        s := Ccore.bytes(Ccore.toStr(try partVal(w[i])));
         Buf.str(plain, s);
         if (w[i].kind = Csyntax.ptLit) and not w[i].quoted then
             Buf.str(pat, s);
@@ -1016,7 +1017,7 @@ end;
 proc listOf(a: []Ccore.Val): Ccore.Val;
 begin
     if LEN(a) = 0 then return {kind: Ccore.kList}; end;
-    return {kind: Ccore.kList, n: LEN(a), p: ^U8(ADR(a[0]))};
+    return {kind: Ccore.kList, n: LEN(a), p: ^U8(SYSTEM.ADR(a[0]))};
 end;
 
 (* The procedure def run with args, in a frame of its own: its
@@ -1174,7 +1175,7 @@ begin
 end;
 
 (* Where sub starts in s, from 1; 0 if it doesn't. *)
-proc search(s, sub: []U8): INT;
+proc search(s, sub: []const U8): INT;
 begin
     return Str.find(s, sub) + 1;
 end;
@@ -1295,7 +1296,7 @@ end;
 
 (* --------------------------------------------------------- builtins *)
 
-proc source(path: []U8): ERROR;
+proc source(path: []const U8): ERROR;
 var b: Buf.Buf; e: INT;
 begin
     Buf.init(b, Ccore.temps);
@@ -1310,7 +1311,7 @@ end;
    and gives status 1, and the prompt goes on. Unguarded, the error
    would reach the REPL, which turns the prompt procedure off for good.
    Any other error (Ctrl-C, errexit) is passed on. *)
-proc sourceGuarded(path: []U8): (INT, ERROR);
+proc sourceGuarded(path: []const U8): (INT, ERROR);
 var f: Cvars.Frame; up: ^Csyntax.Stmt; lvl, ns, ex: INT; err: ERROR;
 begin
     lvl := nsave;
@@ -1333,7 +1334,7 @@ begin
 end;
 
 (* errHead, then msg on standard error. *)
-proc complain(msg: []U8);
+proc complain(msg: []const U8);
 begin
     Ccore.errHead;
     Ccore.put(2, msg);
@@ -1384,8 +1385,8 @@ end;
 
 (* The job fg, bg or disown (who) means: its number, with or without %,
    or the current job; -1, having said why, if there is none. *)
-proc jobArg(a: []Ccore.Val; who: []U8): INT;
-var v, w: []U8; js: []Job; i: I64; k: INT; ok: BOOL;
+proc jobArg(a: []Ccore.Val; who: []const U8): INT;
+var v, w: []const U8; js: []Job; i: I64; k: INT; ok: BOOL;
 begin
     js := Jobs.all(jobs);
     if LEN(a) > 1 then
@@ -1435,7 +1436,7 @@ begin
     end;
     k := jobArg(a, "fg");
     if k < 0 then return 1, nil; end;
-    j := ADR(Jobs.all(jobs)[k]);
+    j := SYSTEM.ADR(Jobs.all(jobs)[k]);
     Ccore.put(2, Ccore.text("{}\n", [Fmt.str(j^.name)]));
     giveTerm(j^.pgid);
     if j^.stopped then
@@ -1452,7 +1453,7 @@ var j: ^Job; k: INT;
 begin
     k := jobArg(a, "bg");
     if k < 0 then return 1; end;
-    j := ADR(Jobs.all(jobs)[k]);
+    j := SYSTEM.ADR(Jobs.all(jobs)[k]);
     if j^.stopped then
         j^.stopped := false;
         _ := Sys.kill(-j^.pgid, Sys.sigCont);
@@ -1474,7 +1475,7 @@ begin
 end;
 
 (* ulimit's complaint, msg perhaps from Ccore.text: 1. *)
-proc badLimit(msg: []U8): INT;
+proc badLimit(msg: []const U8): INT;
 begin
     complain("ulimit: ");
     Ccore.put(2, msg);
@@ -1485,7 +1486,7 @@ end;
 (* ulimit [-c | -f | -n | -s | -t | -v] [value | unlimited]: a soft
    limit shown or set, in kilobytes but for -n and -t. *)
 proc ulimit(a: []Ccore.Val): INT;
-var v: []U8; soft, hard, i: I64; which, scale, k, e: INT; ok: BOOL;
+var v: []const U8; soft, hard, i: I64; which, scale, k, e: INT; ok: BOOL;
 begin
     which := Sys.limitFileSize;
     scale := 1024;
@@ -1536,7 +1537,7 @@ end;
 (* trap name|-|'' signal ...: a procedure for each signal, or it
    ignored, or back to the shell's default. *)
 proc trap(a: []Ccore.Val): INT;
-var act, v: []U8; r, i, j, k: INT; ok: BOOL;
+var act, v: []const U8; r, i, j, k: INT; ok: BOOL;
 begin
     if LEN(a) < 3 then
         complain("trap: usage: trap name|-|'' signal...\n");
@@ -1555,7 +1556,7 @@ begin
             continue;
         end;
         Str.free(Heap.heap, traps[j].name);
-        traps[j].name := "";
+        traps[j].name := [];
         if LEN(act) = 0 then
             traps[j].act := aIgnore;
         elsif act = "-" then
@@ -1572,7 +1573,7 @@ end;
 
 (* cd [dir], cd -: PWD and OLDPWD kept. *)
 proc cd(a: []Ccore.Val): (INT, ERROR);
-var r: ^Cvars.Var; v, old: Ccore.Val; d: []U8; e: INT; toOld: BOOL;
+var r: ^Cvars.Var; v, old: Ccore.Val; d: []const U8; e: INT; toOld: BOOL;
 begin
     toOld := (LEN(a) > 1) and (a[1].kind = Ccore.kStr) and (Ccore.bytes(a[1]) = "-");
     if toOld then
@@ -1626,7 +1627,7 @@ begin
 end;
 
 (* s added to b, in colour (an SGR code) when type and help are in colour. *)
-proc tint(var b: Buf.Buf; colour, s: []U8);
+proc tint(var b: Buf.Buf; colour, s: []const U8);
 begin
     if tinted() then
         Fmt.write(b, "\x1b[{}m{}\x1b[0m", [Fmt.str(colour), Fmt.str(s)]);
@@ -1647,7 +1648,7 @@ end;
 
 (* A builtin's usage, cd [dir] or split(s[, sep]), added to b with its
    name painted. *)
-proc tintUsage(var b: Buf.Buf; u: []U8);
+proc tintUsage(var b: Buf.Buf; u: []const U8);
 var i: INT;
 begin
     i := 0;
@@ -1658,7 +1659,7 @@ end;
 
 (* Are paths a and b one file, as a directory reached by a symbolic
    link, /bin for /usr/bin, makes them? *)
-proc sameFile(a, b: []U8): BOOL;
+proc sameFile(a, b: []const U8): BOOL;
 var x, y: Sys.Info; ex, ey: INT;
 begin
     x, ex := Sys.info(a);
@@ -1667,7 +1668,7 @@ begin
 end;
 
 (* type's line for name, a program at path f. *)
-proc program(name, f: []U8);
+proc program(name, f: []const U8);
 var b: Buf.Buf;
 begin
     Buf.init(b, Ccore.temps);
@@ -1685,8 +1686,8 @@ end;
    routine, which a call names, not a command. A program reached twice
    by PATH, through a link, is said once. Nothing is written, and false
    returned, if it is none of them. *)
-proc typeName(name: []U8): BOOL;
-var def: ^Csyntax.Stmt; b: Buf.Buf; seen: Names.Vec; prev: [][]U8; path, dir, f: []U8; i, k: INT; found, more, again: BOOL;
+proc typeName(name: []const U8): BOOL;
+var def: ^Csyntax.Stmt; b: Buf.Buf; seen: Names.Vec; prev: [][]const U8; path, dir, f: []const U8; i, k: INT; found, more, again: BOOL;
 begin
     found := false;
     for i := 0 to LEN(Csyntax.Keywords) - 1 do
@@ -1768,7 +1769,7 @@ end;
 
 (* type name ...: what each name is; 1 if any is nothing. *)
 proc typeNames(a: []Ccore.Val): INT;
-var name: []U8; k, r: INT;
+var name: []const U8; k, r: INT;
 begin
     r := 0;
     for k := 1 to LEN(a) - 1 do
@@ -1785,8 +1786,8 @@ end;
    its lines, trimmed, without its // or braces; "" if there is none. It
    is a run of // lines, or a { ... } that opens its own line and closes
    on the line above. *)
-proc commentAbove(path: []U8; l: INT): []U8;
-var b, out: Buf.Buf; ls: Names.Vec; a: [][]U8; s, rest: []U8; i, j, k: INT; more: BOOL;
+proc commentAbove(path: []const U8; l: INT): []const U8;
+var b, out: Buf.Buf; ls: Names.Vec; a: [][]const U8; s, rest: []const U8; i, j, k: INT; more: BOOL;
 begin
     if (LEN(path) = 0) or (l < 2) then return ""; end;
     Buf.init(b, Ccore.temps);
@@ -1826,7 +1827,7 @@ end;
 (* help names a procedure: its heading, where it is, and the comment
    above it. *)
 proc helpProc(def: ^Csyntax.Stmt);
-var b: Buf.Buf; rest, ln: []U8; i: INT;
+var b: Buf.Buf; rest, ln: []const U8; i: INT;
 begin
     Buf.init(b, Ccore.temps);
     if def^.isFunc then tint(b, tKeyword, "function"); else tint(b, tKeyword, "procedure"); end;
@@ -1854,7 +1855,7 @@ begin
 end;
 
 (* help names a builtin, or a keyword: its usage. *)
-proc helpBuiltin(name: []U8): BOOL;
+proc helpBuiltin(name: []const U8): BOOL;
 var b: Buf.Buf; i: INT;
 begin
     Buf.init(b, Ccore.temps);
@@ -1884,7 +1885,7 @@ end;
    procedure's heading and the comment above it, or a builtin's usage;
    1 if any name is neither. *)
 proc help(a: []Ccore.Val): INT;
-var b: Buf.Buf; def: ^Csyntax.Stmt; name: []U8; i, k, r: INT;
+var b: Buf.Buf; def: ^Csyntax.Stmt; name: []const U8; i, k, r: INT;
 begin
     if LEN(a) = 1 then
         Buf.init(b, Ccore.temps);
@@ -1940,7 +1941,7 @@ end;
 
 (* umask [mode]: the mask shown, in octal, or set. *)
 proc umask(a: []Ccore.Val): INT;
-var d: [4]U8; v: []U8; mask, k: INT;
+var d: [4]U8; v: []const U8; mask, k: INT;
 begin
     if LEN(a) < 2 then
         mask := Sys.umask(0);
@@ -1971,7 +1972,7 @@ end;
 (* The command builtin bi, from 1 as cmdBuiltin numbers them, run with
    the words a: its status. *)
 proc runCmdBuiltin(bi: INT; a: []Ccore.Val): (INT, ERROR);
-var v: []U8; r, k: INT;
+var v: []const U8; r, k: INT;
 begin
     match Csyntax.CmdBuiltins[bi - 1].name of
     | "cd": return cd(a);
@@ -2018,7 +2019,7 @@ begin
     return LEN(e^.args), nil;
 end;
 
-proc argStr(e: ^Csyntax.Expr; i: INT): ([]U8, ERROR);
+proc argStr(e: ^Csyntax.Expr; i: INT): ([]const U8, ERROR);
 begin
     return Ccore.bytes(Ccore.toStr(try eval(e^.args[i]))), nil;
 end;
@@ -2058,7 +2059,7 @@ begin
 end;
 
 (* s cut at each sep, or into its words if sep is empty: a list. *)
-proc split(s, sep: []U8): Ccore.Val;
+proc split(s, sep: []const U8): Ccore.Val;
 var out: Vals.Vec; i, j: INT;
 begin
     Vals.init(out, Ccore.temps);
@@ -2122,13 +2123,13 @@ begin
         w := w * 2;
     end;
     if LEN(a) > 0 then
-        if ADR(src[0]) # ADR(a[0]) then COPY(a, src); end;
+        if SYSTEM.ADR(src[0]) # SYSTEM.ADR(a[0]) then COPY(a, src); end;
     end;
     return nil;
 end;
 
 (* A name the environment can hold: not empty, no = and no NUL. *)
-proc envName(s: []U8): BOOL;
+proc envName(s: []const U8): BOOL;
 var i: INT;
 begin
     for i := 0 to LEN(s) - 1 do
@@ -2165,7 +2166,7 @@ end;
 (* basename(p[, suffix]) and dirname(p), as POSIX has them: slashes at
    the end don't count, and / stays /. *)
 proc pathPart(e: ^Csyntax.Expr; n: INT): (Ccore.Val, ERROR);
-var a, x: []U8; i, k: INT;
+var a, x: []const U8; i, k: INT;
 begin
     a := try argStr(e, 0);
     k := LEN(a);
@@ -2188,7 +2189,7 @@ end;
 (* The builtin routine e calls. *)
 proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
 var
-    a, b, c: []U8; v: Ccore.Val; buf: Buf.Buf; out: Vals.Vec; x: ^Csyntax.Expr; r: ^Cvars.Var; g: []Cvars.Var;
+    a, b, c: []const U8; v: Ccore.Val; buf: Buf.Buf; out: Vals.Vec; x: ^Csyntax.Expr; r: ^Cvars.Var; g: []Cvars.Var;
     n, i, k: INT; ia, ib: I64; got: BOOL;
 begin
     match e^.bi of
@@ -2417,7 +2418,7 @@ end;
 proc runSingle(c: ^Csyntax.Cmd; tail: BOOL): (INT, ERROR);
 var st: Stage; pid, lvl, r: INT; ok: BOOL; err: ERROR;
 begin
-    if (c^.call = nil) and (c^.stmt = nil) then subSt := ADR(st); end;
+    if (c^.call = nil) and (c^.stmt = nil) then subSt := SYSTEM.ADR(st); end;
     try expand(c, st);
     if isExternal(c, st) then
         if tail then
@@ -2642,7 +2643,7 @@ begin
         else
             k := reaped(pid, e);
             if k >= 0 then
-                j := ADR(Jobs.all(jobs)[k]);
+                j := SYSTEM.ADR(Jobs.all(jobs)[k]);
                 if j^.left = 0 then
                     if j^.ends[LEN(j^.ends) - 1].how = Sys.killed then
                         report(k, "killed");
@@ -2853,7 +2854,7 @@ end;
 (* ---------------------------------------------------------- running *)
 
 (* The program text, from the file path ("" if none), parsed and run. *)
-proc runText*(text, path: []U8): ERROR;
+proc runText*(text, path: []const U8): ERROR;
 begin
     return execList(try Csyntax.parse(text, path));
 end;
@@ -2875,7 +2876,7 @@ end;
 
 (* A line typed at the prompt, parsed and run; More, with nothing
    written, if it ends before what it opens does. *)
-proc runTyped*(text: []U8): ERROR;
+proc runTyped*(text: []const U8): ERROR;
 begin
     return execList(try Csyntax.parseTyped(text));
 end;
@@ -2887,9 +2888,9 @@ end;
    answers with a list of words or a string of lines, which go into
    ans. It runs with every standard fd on /dev/null, an error in it
    counts as no answer, and status is left as it was. *)
-proc ask(p: []U8; words: []Ccore.Val; var ans: Vals.Vec);
+proc ask(p: []const U8; words: []Ccore.Val; var ans: Vals.Vec);
 var
-    def, up: ^Csyntax.Stmt; all: Vals.Vec; one: [1]Ccore.Val; r: Ccore.Val; f: Cvars.Frame; s: []U8;
+    def, up: ^Csyntax.Stmt; all: Vals.Vec; one: [1]Ccore.Val; r: Ccore.Val; f: Cvars.Frame; s: []const U8;
     st, lvl, ns, ex, fd, i, j: INT; err: ERROR;
 begin
     def := Cvars.findProc("complete");
@@ -2943,7 +2944,7 @@ end;
 (* For the line editor's Tab: what the unquoted word p might become in
    the context cx, after the command's words, added to out; true if out
    is ranked. *)
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL;
+proc complete*(p: []const U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec): BOOL;
 begin
     return Ccomplete.complete(p, cx, words, out, ask);
 end;
@@ -2952,7 +2953,7 @@ end;
    child is to say "did you mean", and the line fixed that way is
    offered as the next line's suggestion. *)
 proc correct(a: []Ccore.Val);
-var nm, fix: []U8;
+var nm, fix: []const U8;
 begin
     if not interactive or (Cvars.depth > 0) or (LEN(a) = 0) then return; end;
     nm := Ccore.bytes(Ccore.toStr(a[0]));
@@ -2966,8 +2967,8 @@ end;
    procedure, and may carry options after blanks, as in "emacs -nw".
    status is left as it was; an error, written already, is the edit's
    end, the line taken as the file holds it. *)
-proc editFile*(path: []U8);
-var a: Vals.Vec; e: []U8; m: Ccore.Mark; st, i, j: INT;
+proc editFile*(path: []const U8);
+var a: Vals.Vec; e: []const U8; m: Ccore.Mark; st, i, j: INT;
 begin
     m := Ccore.mark();
     st := Cvars.status();
@@ -2994,7 +2995,7 @@ end;
 (* The shell's globals at its start: the environment, PWD, the
    switches, lastpid, pid and status. *)
 proc initShell*;
-var r: ^Cvars.Var; d: []U8; e: INT;
+var r: ^Cvars.Var; d: []const U8; e: INT;
 begin
     Cvars.importEnv;
     d, e := Sys.workDir();
@@ -3034,7 +3035,7 @@ end;
    the user's procedure prompt, if custom and there is one; else the
    last part of PWD and "> ". *)
 proc prompt*(more, custom: BOOL): ERROR;
-var def: ^Csyntax.Stmt; cwd: []U8; i: INT;
+var def: ^Csyntax.Stmt; cwd: []const U8; i: INT;
 begin
     if more then
         Ccore.put(2, ". ");

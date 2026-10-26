@@ -23,7 +23,7 @@ const
     gapExtend = 1;
 
 (* Does t hold a capital letter, and so match case exactly? *)
-proc exact*(t: []U8): BOOL;
+proc exact*(t: []const U8): BOOL;
 var i: INT;
 begin
     for i := 0 to LEN(t) - 1 do
@@ -76,7 +76,7 @@ end;
    ends, and a backward scan from there the latest place it can begin:
    the window between is the tightest match, and is scored going
    forward. *)
-proc score*(s, t: []U8; exact: BOOL): INT;
+proc score*(s, t: []const U8; exact: BOOL): INT;
 var i, j, b, e, last, sc, gain: INT;
 begin
     i := 0;

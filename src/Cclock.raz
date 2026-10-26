@@ -11,8 +11,8 @@ module Cclock;
 import Buf, Str, Fmt, Ccore, Zone;
 
 const
-    DayNames: [][]U8 = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    MonthNames: [][]U8 = [
+    DayNames: [][]const U8 = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    MonthNames: [][]const U8 = [
         "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
         "November", "December"
     ];
@@ -31,7 +31,7 @@ end;
 
 (* fmt with the instant ms, milliseconds since 1970, in the local time
    zone, in the arena. *)
-proc format*(fmt: []U8; ms: I64): ([]U8, ERROR);
+proc format*(fmt: []const U8; ms: I64): ([]const U8, ERROR);
 var b: Buf.Buf; tm: Zone.Time; secs: I64; i, off: INT; c: U8;
 begin
     (* whole seconds, rounded down, so that -1 ms is 23:59:59 the day before *)

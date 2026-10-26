@@ -16,7 +16,8 @@
    Depends on Ccore for the values, the errors and where they are. Left
    out: what any of it means, which is Cinterp's. *)
 module Csyntax;
-import Heap, Rt, Sys, Buf, Fmt, Ccore, Parts := Vec(Part), Exprs := Vec(^Expr), Stmts := Vec(^Stmt), Words := Vec(Word), Redirs := Vec(Redir), Cmds := Vec(^Cmd), Pipes := Vec(Pipe), Arms := Vec(Arm), Names := Vec([]U8), Items := Vec(^OutItem), Refs := Vec(Ref), Heres := Vec(Here);
+import Heap, Rt, Sys, Buf, Fmt, Ccore, Parts := Vec(Part), Exprs := Vec(^Expr), Stmts := Vec(^Stmt), Words := Vec(Word), Redirs := Vec(Redir), Cmds := Vec(^Cmd), Pipes := Vec(Pipe), Arms := Vec(Arm), Names := Vec([]const U8), Items := Vec(^OutItem), Refs := Vec(Ref), Heres := Vec(Here);
+import SYSTEM;
 
 type
     (* A word of a command, or an interpolated string, is parsed into
@@ -32,7 +33,7 @@ type
     Part* = record
         kind*: PartKind;
         quoted*: BOOL;    (* not to be split or globbed *)
-        s*: []U8;
+        s*: []const U8;
         e*: ^Expr;
         cap*: []^Stmt;    (* a capture's or a <(...)'s statements *)
     end;
@@ -54,7 +55,7 @@ type
         stmt*: ^Stmt;
         redirs*: []Redir;
         line*: INT;
-        path*: []U8;    (* the file it came from, "" if none *)
+        path*: []const U8;    (* the file it came from, "" if none *)
     end;
 
     Join* = (jNone, jAnd, jOr);    (* how a pipeline goes on to the next: &&, || *)
@@ -78,7 +79,7 @@ type
         kind*: ExprKind;
         op*: Op;
         v*: Ccore.Val;    (* a literal's *)
-        s*: []U8;    (* a variable's or a call's name *)
+        s*: []const U8;    (* a variable's or a call's name *)
         line*, col*: INT;    (* a variable's or a call's: where its name starts *)
         bi*: Builtin;    (* a call's builtin, bNone for a procedure of the script's *)
         a*, b*: ^Expr;
@@ -96,8 +97,8 @@ type
     Stmt* = record
         kind*: StmtKind;
         line*: INT;
-        path*: []U8;    (* the file it came from, "" if none *)
-        s*: []U8;    (* the name assigned, declared or counted *)
+        path*: []const U8;    (* the file it came from, "" if none *)
+        s*: []const U8;    (* the name assigned, declared or counted *)
         col*: INT;    (* a procedure's or a variable's name: its byte column *)
         e*, e2*: ^Expr;
         body*, els*: ^Stmt;
@@ -106,7 +107,7 @@ type
         bg*: BOOL;    (* and run in the background *)
         down*, isFunc*: BOOL;
         arms*: []Arm;
-        params*: [][]U8;
+        params*: [][]const U8;
     end;
 
     (* -q outline and -q words: a procedure or a variable, in source
@@ -120,14 +121,14 @@ type
     (* -q def: a use of a name that may be a procedure's, in source order:
        a command's plain word 0, or a call; where it is, and its length *)
     Ref* = record
-        name*: []U8;
+        name*: []const U8;
         line*, col*, len*: INT;
         owner*: ^OutItem;
     end;
 
     Doc* = record
-        name*: []U8;
-        usage*: []U8;    (* as concha.1 shows it; test.cn checks *)
+        name*: []const U8;
+        usage*: []const U8;    (* as concha.1 shows it; test.cn checks *)
     end;
 
     Tok = (tEOF, tIdent, tInt, tStr, tDStr, tBack, tAssign, tPlus, tMinus, tStar, tEq, tNe, tLt, tGt, tLe, tGe, tLP, tRP, tLB, tRB, tComma, tSemi, tColon, tDot, tSlash, tOther);
@@ -199,15 +200,15 @@ const
         {name: "help", usage: "help [name ...]"}
     ];
 
-    Keywords*: [][]U8 = [
+    Keywords*: [][]const U8 = [
         "begin", "end", "if", "then", "else", "while", "do", "repeat", "until", "for", "to",
         "downto", "in", "case", "of", "var", "procedure", "function", "export", "break",
         "continue", "exit", "and", "or", "not", "xor", "div", "mod", "otherwise", "nil"
     ];
 
 var
-    src: []U8;
-    srcName: []U8;    (* the file being parsed, "" if none *)
+    src: []const U8;
+    srcName: []const U8;    (* the file being parsed, "" if none *)
     pos, line: INT;
     heres: Heres.Vec;
     inBack: INT;    (* captures open *)
@@ -222,7 +223,7 @@ var
     (* the lookahead token, and where the one before it ended *)
     tok: Tok;
     tokPos, tokLine: INT;
-    tokS: []U8;    (* a name's or a string's text *)
+    tokS: []const U8;    (* a name's or a string's text *)
     tokI: I64;
     endPos, endLine: INT;
 
@@ -305,7 +306,7 @@ begin
 end;
 
 (* The error msg about what starts at byte ofs, on line l. *)
-proc synErrAt(ofs, l: INT; msg: []U8): ERROR;
+proc synErrAt(ofs, l: INT; msg: []const U8): ERROR;
 begin
     Ccore.where^.line := l;
     Ccore.where^.file := srcName;
@@ -315,19 +316,19 @@ begin
 end;
 
 (* The error at the scanner's place. *)
-proc synErr(msg: []U8): ERROR;
+proc synErr(msg: []const U8): ERROR;
 begin
     return synErrAt(pos, line, msg);
 end;
 
 (* The error at the lookahead token. *)
-proc tokErr(msg: []U8): ERROR;
+proc tokErr(msg: []const U8): ERROR;
 begin
     return synErrAt(tokPos, tokLine, msg);
 end;
 
 (* "unexpected 'w'". *)
-proc unexpected(w: []U8): []U8;
+proc unexpected(w: []const U8): []const U8;
 begin
     return Ccore.text("unexpected '{}'", [Fmt.str(w)]);
 end;
@@ -400,7 +401,7 @@ begin
 end;
 
 (* Is the name at i k? *)
-proc wordIs(i: INT; k: []U8): BOOL;
+proc wordIs(i: INT; k: []const U8): BOOL;
 var e: INT;
 begin
     e := identEnd(i);
@@ -408,7 +409,7 @@ begin
 end;
 
 (* The keyword k next, passed if it is. *)
-proc acceptKw(k: []U8): (BOOL, ERROR);
+proc acceptKw(k: []const U8): (BOOL, ERROR);
 begin
     try blank(true);
     if not wordIs(pos, k) then return false, nil; end;
@@ -416,13 +417,13 @@ begin
     return true, nil;
 end;
 
-proc expectKw(k: []U8): ERROR;
+proc expectKw(k: []const U8): ERROR;
 begin
     if not try acceptKw(k) then return synErr(Ccore.text("expected '{}'", [Fmt.str(k)])); end;
     return nil;
 end;
 
-proc reserved(s: []U8): BOOL;
+proc reserved(s: []const U8): BOOL;
 var i: INT;
 begin
     for i := 0 to LEN(Keywords) - 1 do
@@ -432,7 +433,7 @@ begin
 end;
 
 (* The builtin called name, bNone if none is. *)
-proc builtin*(name: []U8): Builtin;
+proc builtin*(name: []const U8): Builtin;
 var i: INT;
 begin
     for i := 0 to LEN(Builtins) - 1 do
@@ -442,8 +443,8 @@ begin
 end;
 
 (* A name, kept. *)
-proc name: ([]U8, ERROR);
-var e: INT; s: []U8;
+proc name: ([]const U8, ERROR);
+var e: INT; s: []const U8;
 begin
     try blank(false);
     e := identEnd(pos);
@@ -558,13 +559,13 @@ begin
     return nil;
 end;
 
-proc tokIs(k: []U8): BOOL;
+proc tokIs(k: []const U8): BOOL;
 begin
     return (tok = tIdent) and (tokS = k);
 end;
 
 (* The token t, passed, or the error msg. *)
-proc expect(t: Tok; msg: []U8): ERROR;
+proc expect(t: Tok; msg: []const U8): ERROR;
 begin
     if tok # t then return tokErr(msg); end;
     return next();
@@ -589,14 +590,14 @@ begin
 end;
 
 (* A string literal's value, s kept as it is. *)
-proc strLit(s: []U8): Ccore.Val;
+proc strLit(s: []const U8): Ccore.Val;
 begin
     if LEN(s) = 0 then return {kind: Ccore.kStr}; end;
-    return {kind: Ccore.kStr, n: LEN(s), p: ADR(s[0])};
+    return {kind: Ccore.kStr, n: LEN(s), p: SYSTEM.PTR(s)};
 end;
 
 (* A use of name, on line l at column c, in the refs, when outlining. *)
-proc noteRef(name: []U8; l, c: INT);
+proc noteRef(name: []const U8; l, c: INT);
 begin
     if outlining then Refs.push(uses, {name: name, line: l, col: c, len: LEN(name), owner: curProc}); end;
 end;
@@ -759,7 +760,7 @@ begin
 end;
 
 (* Expressions until close, with commas between, and close passed. *)
-proc exprList(close: Tok; msg: []U8): ([]^Expr, ERROR);
+proc exprList(close: Tok; msg: []const U8): ([]^Expr, ERROR);
 var v: Exprs.Vec;
 begin
     Exprs.init(v, Heap.heap);
@@ -1053,7 +1054,7 @@ end;
    is the tag, after blanks, and as many blanks are taken off each of its
    lines. The scanner jumps over it when it comes to it. *)
 proc heredoc: (Word, ERROR);
-var tb, t: Buf.Buf; l: Parts.Vec; hs: []Here; tag: []U8; tp, i, j, k, start, ls, stop, ind, lines, sp, sl: INT; quoted, again: BOOL;
+var tb, t: Buf.Buf; l: Parts.Vec; hs: []Here; tag: []const U8; tp, i, j, k, start, ls, stop, ind, lines, sp, sl: INT; quoted, again: BOOL;
 begin
     cmdBlank;
     Buf.init(tb, Ccore.temps);
@@ -1427,8 +1428,8 @@ end;
 
 (* The file being parsed, from the root, so that type and help still
    find a procedure's file after a cd. *)
-proc fullSrcName: []U8;
-var dir: []U8; err: INT;
+proc fullSrcName: []const U8;
+var dir: []const U8; err: INT;
 begin
     if (LEN(srcName) = 0) or (srcName[0] = '/') then return srcName; end;
     dir, err := Sys.workDir();
@@ -1609,7 +1610,7 @@ begin
 end;
 
 proc parseStmt: (^Stmt, ERROR);
-var s: ^Stmt; e, j, d: INT; sc: Closers; w: []U8;
+var s: ^Stmt; e, j, d: INT; sc: Closers; w: []const U8;
 begin
     try blank(true);
     if ch() = 0 then return nil, synErr("unexpected end of input"); end;
@@ -1703,7 +1704,7 @@ end;
 
 (* ---------------------------------------------------------- parsing *)
 
-proc parseAll(text, path: []U8; more, outline: BOOL): ([]^Stmt, ERROR);
+proc parseAll(text, path: []const U8; more, outline: BOOL): ([]^Stmt, ERROR);
 var l: []^Stmt;
 begin
     src := text;
@@ -1725,21 +1726,21 @@ begin
 end;
 
 (* The statements of text, from the file path, "" if none. *)
-proc parse*(text, path: []U8): ([]^Stmt, ERROR);
+proc parse*(text, path: []const U8): ([]^Stmt, ERROR);
 begin
     return parseAll(text, path, false, false);
 end;
 
 (* The statements of a line typed at the prompt; More, with nothing
    written, if it ends before what it opens does. *)
-proc parseTyped*(text: []U8): ([]^Stmt, ERROR);
+proc parseTyped*(text: []const U8): ([]^Stmt, ERROR);
 begin
     return parseAll(text, "", true, false);
 end;
 
 (* The statements of text, with the outline and the refs noted, for -q;
    text must stay as it is while they are read. *)
-proc parseNoted*(text, path: []U8): ([]^Stmt, ERROR);
+proc parseNoted*(text, path: []const U8): ([]^Stmt, ERROR);
 begin
     return parseAll(text, path, false, true);
 end;

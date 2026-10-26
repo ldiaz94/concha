@@ -30,8 +30,8 @@ const
     QueryUsage = "usage: concha -q check|outline|words|def script\n";
 
     (* The colours a prompt may use, as variables of these names *)
-    ColourNames: [][]U8 = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bold", "dim", "reset"];
-    ColourCodes: [][]U8 = ["30", "31", "32", "33", "34", "35", "36", "37", "1", "2", "0"];
+    ColourNames: [][]const U8 = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bold", "dim", "reset"];
+    ColourCodes: [][]const U8 = ["30", "31", "32", "33", "34", "35", "36", "37", "1", "2", "0"];
 
 var
     top: Ccore.Mark;    (* the arena as it is between lines *)
@@ -45,14 +45,14 @@ var
 (* --------------------------------------------------------- setup *)
 
 (* name in the home directory *)
-proc homeFile(name: []U8): []U8;
+proc homeFile(name: []const U8): []const U8;
 begin
     return Ccore.perm(Ccore.text("{}/{}", [Fmt.str(Cvars.home()), Fmt.str(name)]));
 end;
 
 (* The whole file at path, or the end of the shell with status bad,
    saying why not. *)
-proc load(path: []U8; bad: INT): []U8;
+proc load(path: []const U8; bad: INT): []const U8;
 var b: Buf.Buf; e: INT;
 begin
     Buf.init(b, Heap.heap);
@@ -66,7 +66,7 @@ begin
 end;
 
 proc dumbTerm: BOOL;
-var t: []U8;
+var t: []const U8;
 begin
     t := Cvars.str("TERM");
     return (LEN(t) = 0) or (t = "dumb");
@@ -98,8 +98,8 @@ end;
 
 (* -n: the syntax errors of the script at path ("": standard input)
    reported, and nothing run. *)
-proc check(path: []U8);
-var text: []U8; err: ERROR;
+proc check(path: []const U8);
+var text: []const U8; err: ERROR;
 begin
     if LEN(path) = 0 then text := load("/dev/stdin", 127); else text := load(path, 127); end;
     Ccore.opts^.showCol := true;
@@ -118,7 +118,7 @@ end;
    of each proc, func and var outside them; a proc still open at an
    error ends on the error's line. *)
 proc putOutline;
-var o: []^Csyntax.OutItem; s: ^Csyntax.Stmt; kind: []U8; i, last: INT;
+var o: []^Csyntax.OutItem; s: ^Csyntax.Stmt; kind: []const U8; i, last: INT;
 begin
     o := Csyntax.outline();
     for i := 0 to LEN(o) - 1 do
@@ -140,7 +140,7 @@ begin
 end;
 
 (* A line of -q words: kind, word and detail *)
-proc putWord(kind, w, detail: []U8);
+proc putWord(kind, w, detail: []const U8);
 begin
     Ccore.put(1, Ccore.text("{}\t{}\t{}\n", [Fmt.str(kind), Fmt.str(w), Fmt.str(detail)]));
 end;
@@ -198,7 +198,7 @@ begin
 end;
 
 (* The decimal number s, or -1 *)
-proc num(s: []U8): INT;
+proc num(s: []const U8): INT;
 var r, i: INT;
 begin
     if LEN(s) = 0 then return -1; end;
@@ -212,7 +212,7 @@ end;
 
 (* "file:line:col" cut at its last two colons: the file, the line and
    the column, and false if it has no line and column. *)
-proc splitPos(s: []U8): ([]U8, INT, INT, BOOL);
+proc splitPos(s: []const U8): ([]const U8, INT, INT, BOOL);
 var i, j, l, c: INT;
 begin
     j := LEN(s);
@@ -243,7 +243,7 @@ end;
 (* The proc or func that name refers to from inside the procedure scope
    (nil: outside any): the innermost declaration visible there, wherever
    in the file it stands; nil if none. *)
-proc resolve(name: []U8; scope: ^Csyntax.OutItem): ^Csyntax.OutItem;
+proc resolve(name: []const U8; scope: ^Csyntax.OutItem): ^Csyntax.OutItem;
 var o: []^Csyntax.OutItem; i: INT;
 begin
     o := Csyntax.outline();
@@ -290,7 +290,7 @@ end;
    words, the words that can be typed at file:line:column; and def, the
    declaration of the procedure named there. *)
 proc query(a: INT);
-var kind, path, text: []U8; l, c: INT; ok, words, def, dump: BOOL; err: ERROR;
+var kind, path, text: []const U8; l, c: INT; ok, words, def, dump: BOOL; err: ERROR;
 begin
     if a + 3 # ARGC() then
         Ccore.errHead;
@@ -343,7 +343,7 @@ end;
 (* The script text, from the file path ("" if none), run, and the end
    of the shell: with the status the script left, 130 after a Ctrl-C,
    or 2 after an error. *)
-proc script(text, path: []U8);
+proc script(text, path: []const U8);
 var err: ERROR;
 begin
     err := Cinterp.runText(text, path);
@@ -360,7 +360,7 @@ end;
 (* ~/.concharc, if there is one, run; an error in it ends it, not the
    shell. *)
 proc runRc;
-var b: Buf.Buf; rc: []U8;
+var b: Buf.Buf; rc: []const U8;
 begin
     Buf.init(b, Heap.heap);
     rc := homeFile(".concharc");
@@ -397,7 +397,7 @@ end;
 (* A line of input added to line: from the line editor, or as much as
    one read gives. *)
 proc getLine: Cedit.Got;
-var chunk: [4096]U8; g: Cedit.Got; s: []U8; k: INT;
+var chunk: [4096]U8; g: Cedit.Got; s: []const U8; k: INT;
 begin
     if editing then
         g, s := Cedit.editLine(cont);
@@ -437,7 +437,7 @@ end;
 (* One turn of the prompt: a line read and run; true when the shell is
    to leave. *)
 proc turn: (BOOL, ERROR);
-var text: []U8;
+var text: []const U8;
 begin
     Ccore.release(top);
     if Cinterp.takeIntr() then Ccore.put(2, "\n"); end;
@@ -499,7 +499,7 @@ end;
 
 (* Is argument i the option -c, for c? *)
 proc isOpt(i: INT; c: U8): BOOL;
-var s: []U8;
+var s: []const U8;
 begin
     if i >= ARGC() then return false; end;
     s := Files.arg(i);
@@ -516,7 +516,7 @@ end;
    is any shell; and whether -i, which asks for the prompt even without
    a terminal, was among them. *)
 proc options: (INT, BOOL);
-var s: []U8; a, k: INT; forceI, i: BOOL;
+var s: []const U8; a, k: INT; forceI, i: BOOL;
 begin
     a := 1;
     forceI := false;
@@ -537,7 +537,7 @@ begin
 end;
 
 proc main*;
-var text: []U8; a: INT; forceI: BOOL;
+var text: []const U8; a: INT; forceI: BOOL;
 begin
     a, forceI := options();
     if isHelp(a) then

@@ -20,14 +20,15 @@
    statements that are procedures. Left out: what runs them, which is
    Cinterp's. *)
 module Cvars;
-import Sys, Heap, Buf, Fmt, Str, Ccore, Csyntax, Vars := Vec(Var), Procs := Vec(^Csyntax.Stmt), Names := Vec([]U8);
+import Sys, Heap, Buf, Fmt, Str, Ccore, Csyntax, Vars := Vec(Var), Procs := Vec(^Csyntax.Stmt), Names := Vec([]const U8);
+import SYSTEM;
 
 const
     MaxDepth = 400;    (* procedure calls under way, at most *)
 
 type
     Var* = record
-        name*: []U8;    (* from the heap, kept for good *)
+        name*: []const U8;    (* from the heap, kept for good *)
         v*: Ccore.Val;
         exported*: BOOL;    (* passed on to the programs the shell runs *)
         readOnly*: BOOL;
@@ -43,7 +44,7 @@ type
     (* The closest name to a target seen so far, for "did you mean" *)
     Best* = record
         dist, ties: INT;
-        name: []U8;
+        name: []const U8;
     end;
 
 var
@@ -55,18 +56,18 @@ var
 (* -------------------------------------------------------- variables *)
 
 (* The newest variable called name in t, from index lo on; nil if none. *)
-proc look(var t: Vars.Vec; lo: INT; name: []U8): ^Var;
+proc look(var t: Vars.Vec; lo: INT; name: []const U8): ^Var;
 var a: []Var; i: INT;
 begin
     a := Vars.all(t);
     for i := LEN(a) - 1 to lo by -1 do
-        if a[i].name = name then return ADR(a[i]); end;
+        if a[i].name = name then return SYSTEM.ADR(a[i]); end;
     end;
     return nil;
 end;
 
 (* A new variable called name in t, nil; good until t next grows. *)
-proc add(var t: Vars.Vec; name: []U8): ^Var;
+proc add(var t: Vars.Vec; name: []const U8): ^Var;
 var r: ^Var;
 begin
     r := Vars.add(t);
@@ -76,7 +77,7 @@ end;
 
 (* The variable name means here: a local of the frame on top, else a
    global; nil if none. *)
-proc find*(name: []U8): ^Var;
+proc find*(name: []const U8): ^Var;
 var r: ^Var;
 begin
     if depth > 0 then
@@ -87,14 +88,14 @@ begin
 end;
 
 (* The global called name; nil if none. *)
-proc findGlobal*(name: []U8): ^Var;
+proc findGlobal*(name: []const U8): ^Var;
 begin
     return look(globals, 0, name);
 end;
 
 (* The global called name, made nil if there is none. name is kept as
    it is, so it must live as long as the shell. *)
-proc global*(name: []U8): ^Var;
+proc global*(name: []const U8): ^Var;
 var r: ^Var;
 begin
     r := look(globals, 0, name);
@@ -104,7 +105,7 @@ end;
 
 (* A new global called name, beside any other of its name, as the
    environment may have two. *)
-proc newGlobal*(name: []U8): ^Var;
+proc newGlobal*(name: []const U8): ^Var;
 begin
     return add(globals, name);
 end;
@@ -128,7 +129,7 @@ end;
 
 (* name := v: the variable name means, or a new one in the frame on top,
    or a global outside any procedure. *)
-proc assign*(name: []U8; v: Ccore.Val): ERROR;
+proc assign*(name: []const U8; v: Ccore.Val): ERROR;
 var r: ^Var;
 begin
     r := find(name);
@@ -140,7 +141,7 @@ end;
 
 (* var name := v: a variable of the frame on top, or a global outside
    any procedure, whatever the frames below or the globals hold. *)
-proc declare*(name: []U8; v: Ccore.Val): ERROR;
+proc declare*(name: []const U8; v: Ccore.Val): ERROR;
 var r: ^Var;
 begin
     if depth > 0 then
@@ -157,7 +158,7 @@ proc remove(var t: Vars.Vec; r: ^Var);
 var a: []Var; i: INT;
 begin
     a := Vars.all(t);
-    i := r - ADR(a[0]);
+    i := r - SYSTEM.ADR(a[0]);
     Ccore.drop(r^.v);
     COPY(a[i..LEN(a) - 1], a[i + 1..LEN(a)]);
     Vars.resize(t, LEN(a) - 1);
@@ -165,7 +166,7 @@ end;
 
 (* unset name: a local of the frame on top, else a global; nothing if
    neither is. *)
-proc unset*(name: []U8): ERROR;
+proc unset*(name: []const U8): ERROR;
 var r: ^Var;
 begin
     if depth > 0 then
@@ -202,7 +203,7 @@ begin
 end;
 
 (* A global switch such as errexit: on only when it holds true. *)
-proc flag*(name: []U8): BOOL;
+proc flag*(name: []const U8): BOOL;
 var r: ^Var;
 begin
     r := findGlobal(name);
@@ -211,7 +212,7 @@ end;
 
 (* The global name as a string; "" if there is none. A string is the
    variable's own bytes, good until it changes. *)
-proc str*(name: []U8): []U8;
+proc str*(name: []const U8): []const U8;
 var r: ^Var;
 begin
     r := findGlobal(name);
@@ -240,13 +241,13 @@ begin
 end;
 
 (* A new variable of the frame on top, nil; good until the next is made. *)
-proc local*(name: []U8): ^Var;
+proc local*(name: []const U8): ^Var;
 begin
     return add(locals, name);
 end;
 
 (* The local name of the frame on top; nil if none. *)
-proc findLocal*(name: []U8): ^Var;
+proc findLocal*(name: []const U8): ^Var;
 begin
     return look(locals, base, name);
 end;
@@ -265,7 +266,7 @@ end;
 
 (* ------------------------------------------------------- procedures *)
 
-proc findProc*(name: []U8): ^Csyntax.Stmt;
+proc findProc*(name: []const U8): ^Csyntax.Stmt;
 var a: []^Csyntax.Stmt; i: INT;
 begin
     a := Procs.all(procs);
@@ -302,7 +303,7 @@ begin
 end;
 
 (* name, as a candidate for the target. *)
-proc consider*(var b: Best; name, target: []U8);
+proc consider*(var b: Best; name, target: []const U8);
 var d: INT;
 begin
     d := Ccore.distance(target, name);
@@ -315,7 +316,7 @@ end;
 
 (* The one candidate closest to the target, which was n bytes long; ""
    if none is close enough, or two are as close. *)
-proc bestName*(const b: Best; n: INT): []U8;
+proc bestName*(const b: Best; n: INT): []const U8;
 var lim: INT;
 begin
     lim := 2;
@@ -325,15 +326,15 @@ begin
 end;
 
 (* msg about name, with the closest of b if there is one. *)
-proc failMeaning(msg, name: []U8; const b: Best): ERROR;
-var s: []U8;
+proc failMeaning(msg, name: []const U8; const b: Best): ERROR;
+var s: []const U8;
 begin
     s := bestName(b, LEN(name));
     if LEN(s) = 0 then return Ccore.fail(Ccore.text("{} {}", [Fmt.str(msg), Fmt.str(name)])); end;
     return Ccore.fail(Ccore.text("{} {}; did you mean {}?", [Fmt.str(msg), Fmt.str(name), Fmt.str(s)]));
 end;
 
-proc unknownRoutine*(name: []U8): ERROR;
+proc unknownRoutine*(name: []const U8): ERROR;
 var b: Best; a: []^Csyntax.Stmt; i: INT;
 begin
     bestInit(b);
@@ -343,7 +344,7 @@ begin
     return failMeaning("unknown routine", name, b);
 end;
 
-proc undefined*(name: []U8): ERROR;
+proc undefined*(name: []const U8): ERROR;
 var b: Best; a: []Var; i: INT;
 begin
     bestInit(b);
@@ -358,14 +359,14 @@ end;
 
 (* --------------------------------------------------- homes and PATH *)
 
-proc home*: []U8;
+proc home*: []const U8;
 begin
     return str("HOME");
 end;
 
 (* The users in /etc/passwd, and their home directories, in the arena. *)
 proc passwd*(var names, homes: Names.Vec);
-var b: Buf.Buf; s, l: []U8; at: [7]INT; i, f: INT; more: BOOL;
+var b: Buf.Buf; s, l: []const U8; at: [7]INT; i, f: INT; more: BOOL;
 begin
     Buf.init(b, Ccore.temps);
     if Ccore.readFile("/etc/passwd", b) < 0 then return; end;
@@ -389,8 +390,8 @@ end;
 
 (* The home directory of the user name, for ~name; false if there is
    no such user. *)
-proc userHome*(name: []U8): ([]U8, BOOL);
-var names, homes: Names.Vec; a: [][]U8; i: INT;
+proc userHome*(name: []const U8): ([]const U8, BOOL);
+var names, homes: Names.Vec; a: [][]const U8; i: INT;
 begin
     Names.init(names, Ccore.temps);
     Names.init(homes, Ccore.temps);
@@ -404,8 +405,8 @@ end;
 
 (* p, which starts with ~ or ~user, added to b with that part made the
    home directory; false if there is no such user. *)
-proc tilde*(p: []U8; var b: Buf.Buf): BOOL;
-var h: []U8; k: INT; ok: BOOL;
+proc tilde*(p: []const U8; var b: Buf.Buf): BOOL;
+var h: []const U8; k: INT; ok: BOOL;
 begin
     k := 1;
     while (k < LEN(p)) and (p[k] # '/') do INC(k); end;
@@ -421,8 +422,8 @@ begin
 end;
 
 (* PATH, or a sensible one when it is unset or empty. *)
-proc searchPath*: []U8;
-var p: []U8;
+proc searchPath*: []const U8;
+var p: []const U8;
 begin
     p := str("PATH");
     if LEN(p) = 0 then return "/usr/local/bin:/usr/bin:/bin"; end;
@@ -433,7 +434,7 @@ end;
 
 (* The environment, each NAME=value a global, exported. *)
 proc importEnv*;
-var e: []U8; r: ^Var; i, k: INT; ok: BOOL;
+var e: []const U8; r: ^Var; i, k: INT; ok: BOOL;
 begin
     i := 0;
     e, ok := Sys.envAt(0);

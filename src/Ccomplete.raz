@@ -19,7 +19,7 @@
    names, Cfuzzy, and Cedit for the contexts of a word. Left out: the
    user's complete function itself, which only Cinterp can run. *)
 module Ccomplete;
-import Sys, Buf, Str, Ccore, Csyntax, Cvars, Cglob, Cfuzzy, Cedit, Vals := Vec(Ccore.Val), Names := Vec([]U8), Ints := Vec(INT);
+import Sys, Buf, Str, Ccore, Csyntax, Cvars, Cglob, Cfuzzy, Cedit, Vals := Vec(Ccore.Val), Names := Vec([]const U8), Ints := Vec(INT);
 
 const
     MaxSpec = 65536;    (* a bigger completion file is ignored *)
@@ -27,7 +27,7 @@ const
 type
     (* The user's complete function, asked what the word p might become
        after words: its answers added to ans *)
-    Asker* = proc(p: []U8; words: []Ccore.Val; var ans: Vals.Vec);
+    Asker* = proc(p: []const U8; words: []Ccore.Val; var ans: Vals.Vec);
 
     How = (prefix, fuzzy);    (* a name starts with the word, or holds its letters in order *)
 
@@ -49,11 +49,11 @@ type
        none, "remote.add" *)
     Spec = record
         lines: []Ccore.Val;
-        scope: []U8;
+        scope: []const U8;
     end;
 
 (* Does the name nm fit what was typed, p, as how says? *)
-proc fits(nm, p: []U8; how: How): BOOL;
+proc fits(nm, p: []const U8; how: How): BOOL;
 begin
     if how = prefix then return (LEN(nm) >= LEN(p)) and (nm[0..LEN(p)] = p); end;
     return Cfuzzy.score(nm, p, Cfuzzy.exact(p)) >= 0;
@@ -70,7 +70,7 @@ end;
 (* out ordered best match first for p, by Cfuzzy, each name from byte
    off on; ties go to the shorter name, then the first in byte order,
    and repeats are dropped. *)
-proc rank(var out: Vals.Vec; off: INT; p: []U8);
+proc rank(var out: Vals.Vec; off: INT; p: []const U8);
 var sv: Ints.Vec; a: []Ccore.Val; sc: []INT; v: Ccore.Val; i, j, k, t: INT; ex: BOOL;
 begin
     a := Vals.all(out);
@@ -104,15 +104,15 @@ begin
 end;
 
 (* Is the file f a program this user may run? *)
-proc runs*(f: []U8): BOOL;
+proc runs*(f: []const U8): BOOL;
 begin
     return (Cglob.pathKind(f) = Cglob.file) and (Sys.access(f, {Sys.executing}) = 0);
 end;
 
 (* The names in the directory from that fit base, as how says and show
    allows, added to out as pre and the name, a directory's with a /. *)
-proc listDir(from, pre, base: []U8; show: Show; how: How; var out: Vals.Vec);
-var d: Sys.Dir; b: Buf.Buf; nm, full: []U8; k: Cglob.Kind; ok: BOOL;
+proc listDir(from, pre, base: []const U8; show: Show; how: How; var out: Vals.Vec);
+var d: Sys.Dir; b: Buf.Buf; nm, full: []const U8; k: Cglob.Kind; ok: BOOL;
 begin
     if Sys.openDir(d, from) # 0 then return; end;
     nm, ok := Sys.nextEntry(d);
@@ -140,8 +140,8 @@ end;
 
 (* The programs along PATH whose names fit base, as how says, added to
    out. *)
-proc alongPath(base: []U8; how: How; var out: Vals.Vec);
-var path, dir: []U8; more: BOOL;
+proc alongPath(base: []const U8; how: How; var out: Vals.Vec);
+var path, dir: []const U8; more: BOOL;
 begin
     path := Cvars.searchPath();
     more := true;
@@ -155,8 +155,8 @@ end;
 (* The command closest to name, for a "not found" at the prompt: the
    command builtins, the procedures and the programs along PATH, by the
    rules of Cvars.unknownRoutine; "" if none is close enough. *)
-proc suggestCommand*(name: []U8): []U8;
-var b: Cvars.Best; progs: Vals.Vec; p: []^Csyntax.Stmt; v: []Ccore.Val; s: []U8; i: INT;
+proc suggestCommand*(name: []const U8): []const U8;
+var b: Cvars.Best; progs: Vals.Vec; p: []^Csyntax.Stmt; v: []Ccore.Val; s: []const U8; i: INT;
 begin
     Cvars.bestInit(b);
     for i := 0 to LEN(Csyntax.CmdBuiltins) - 1 do Cvars.consider(b, Csyntax.CmdBuiltins[i].name, name); end;
@@ -173,8 +173,8 @@ end;
 
 (* Is p something a command word can run? A builtin, a procedure, a
    program along PATH, or with a slash, a program at that path. *)
-proc knownCommand*(p: []U8): BOOL;
-var b: Buf.Buf; m: Ccore.Mark; path, dir: []U8; i: INT; known, more: BOOL;
+proc knownCommand*(p: []const U8): BOOL;
+var b: Buf.Buf; m: Ccore.Mark; path, dir: []const U8; i: INT; known, more: BOOL;
 begin
     if LEN(p) = 0 then return false; end;
     for i := 0 to LEN(Csyntax.Builtins) - 1 do
@@ -209,7 +209,7 @@ end;
 (* ------------------------------ completion files: concha-complete(5) *)
 
 (* An exported variable's value, or "". *)
-proc envVal(name: []U8): []U8;
+proc envVal(name: []const U8): []const U8;
 var r: ^Cvars.Var;
 begin
     r := Cvars.findGlobal(name);
@@ -226,7 +226,7 @@ end;
    lines: blanks part them, a # starting a field ends the line, and \
    takes the next byte as it is. Every line is kept, empty ones too, so
    that the first is the first. *)
-proc specLines(t: []U8; var lines: Vals.Vec);
+proc specLines(t: []const U8; var lines: Vals.Vec);
 var f: Buf.Buf; fields: Vals.Vec; i: INT;
 begin
     i := 0;
@@ -254,7 +254,7 @@ end;
 
 (* The file at path, if it is one this concha reads: a regular file of
    at most MaxSpec bytes whose first line is "complete 1". *)
-proc specLoad(path: []U8; var lines: Vals.Vec): BOOL;
+proc specLoad(path: []const U8; var lines: Vals.Vec): BOOL;
 var info: Sys.Info; b: Buf.Buf; f: []Ccore.Val; err: INT;
 begin
     info, err := Sys.info(path);
@@ -270,7 +270,7 @@ end;
 
 (* For specFind: the completion file name under the directory d, or
    under its .local/share if local, into lines. *)
-proc under(d: []U8; local: BOOL; name: []U8; var lines: Vals.Vec): BOOL;
+proc under(d: []const U8; local: BOOL; name: []const U8; var lines: Vals.Vec): BOOL;
 var b: Buf.Buf;
 begin
     if (LEN(d) = 0) or (d[0] # '/') then return false; end;
@@ -287,8 +287,8 @@ end;
    $XDG_DATA_DIRS (/usr/local/share:/usr/share), the first that can be
    read. A directory that isn't absolute doesn't count, as the XDG base
    directory rules have it. *)
-proc specFind(cmd: []U8; var lines: Vals.Vec): BOOL;
-var name, dirs, d: []U8; i: INT; more: BOOL;
+proc specFind(cmd: []const U8; var lines: Vals.Vec): BOOL;
+var name, dirs, d: []const U8; i: INT; more: BOOL;
 begin
     i := LEN(cmd);
     while (i > 0) and (cmd[i - 1] # '/') do DEC(i); end;
@@ -316,19 +316,19 @@ begin
 end;
 
 (* Field k of line l, "" past its end. *)
-proc fld(const s: Spec; l, k: INT): []U8;
+proc fld(const s: Spec; l, k: INT): []const U8;
 begin
     if k >= nfields(s, l) then return ""; end;
     return Ccore.bytes(Ccore.items(s.lines[l])[k]);
 end;
 
-proc fldIs(const s: Spec; l, k: INT; q: []U8): BOOL;
+proc fldIs(const s: Spec; l, k: INT; q: []const U8): BOOL;
 begin
     return (k < nfields(s, l)) and (fld(s, l, k) = q);
 end;
 
 (* Is line l a kw line of the scope, with at least nf fields? *)
-proc scoped(const s: Spec; l: INT; kw: []U8; nf: INT): BOOL;
+proc scoped(const s: Spec; l: INT; kw: []const U8; nf: INT): BOOL;
 begin
     return (nfields(s, l) >= nf) and (fld(s, l, 0) = kw) and fldIs(s, l, 1, s.scope);
 end;
@@ -336,7 +336,7 @@ end;
 (* Is line l a well-formed opt line of the scope: a letter or -, and a
    name without dashes or -? *)
 proc isOpt(const s: Spec; l: INT): BOOL;
-var o: []U8;
+var o: []const U8;
 begin
     if not scoped(s, l, "opt", 4) or (LEN(fld(s, l, 2)) # 1) then return false; end;
     o := fld(s, l, 3);
@@ -344,7 +344,7 @@ begin
 end;
 
 (* The name q added to ans, led by the first skip bytes of p. *)
-proc offer1(var ans: Vals.Vec; p: []U8; skip: INT; q: []U8);
+proc offer1(var ans: Vals.Vec; p: []const U8; skip: INT; q: []const U8);
 var b: Buf.Buf;
 begin
     Buf.init(b, Ccore.temps);
@@ -364,7 +364,7 @@ begin
 end;
 
 (* The scope's option with the long name q; -1 if none. *)
-proc long(const s: Spec; q: []U8): INT;
+proc long(const s: Spec; q: []const U8): INT;
 var l: INT;
 begin
     for l := 1 to LEN(s.lines) - 1 do
@@ -373,7 +373,7 @@ begin
     return -1;
 end;
 
-proc isSub(const s: Spec; v: []U8): BOOL;
+proc isSub(const s: Spec; v: []const U8): BOOL;
 var l, k: INT;
 begin
     for l := 1 to LEN(s.lines) - 1 do
@@ -388,7 +388,7 @@ end;
 
 (* The arg line for the scope's mth operand; -1 if none. *)
 proc operand(const s: Spec; m: INT): INT;
-var f: []U8; l, k, x: INT;
+var f: []const U8; l, k, x: INT;
 begin
     for l := 1 to LEN(s.lines) - 1 do
         if scoped(s, l, "arg", 4) then
@@ -414,8 +414,8 @@ end;
    $NAME, braced or not, taken from the environment; nothing if one of
    them is unset. They go into ans as offer1 puts them, those starting
    with a dot only if p does after its first skip bytes. *)
-proc dirNames(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []U8; skip: INT);
-var dd: Sys.Dir; d: Buf.Buf; f, v, nm: []U8; i, j: INT; dot, ok: BOOL;
+proc dirNames(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []const U8; skip: INT);
+var dd: Sys.Dir; d: Buf.Buf; f, v, nm: []const U8; i, j: INT; dot, ok: BOOL;
 begin
     if k >= nfields(s, l) then return; end;
     f := fld(s, l, k);
@@ -460,7 +460,7 @@ begin
 end;
 
 (* The kind line l gives from field k on; one and in add to ans. *)
-proc argKind(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []U8; skip: INT): Kind;
+proc argKind(const s: Spec; l, k: INT; var ans: Vals.Vec; p: []const U8; skip: INT): Kind;
 var i: INT;
 begin
     if fldIs(s, l, k, "dir") then return kDir; end;
@@ -482,8 +482,8 @@ end;
    of p (an option's --name=), and the kind says what else. For
    kCommand, at is where in words the command line of its own starts,
    LEN(words) if at p. *)
-proc specSays(lines: []Ccore.Val; words: []Ccore.Val; p: []U8; var ans: Vals.Vec): (Kind, INT, INT);
-var s: Spec; b: Buf.Buf; w: []U8; count, pend, i, j, li, skip: INT; dashes: BOOL;
+proc specSays(lines: []Ccore.Val; words: []Ccore.Val; p: []const U8; var ans: Vals.Vec): (Kind, INT, INT);
+var s: Spec; b: Buf.Buf; w: []const U8; count, pend, i, j, li, skip: INT; dashes: BOOL;
 begin
     s := {lines: lines, scope: "-"};
     pend := -1;
@@ -562,7 +562,7 @@ end;
 (* -------------------------------------------------------- completion *)
 
 (* q added to out if it fits p as how says. *)
-proc offer(q, p: []U8; how: How; var out: Vals.Vec);
+proc offer(q, p: []const U8; how: How; var out: Vals.Vec);
 begin
     if fits(q, p, how) then Vals.push(out, Ccore.strVal(q)); end;
 end;
@@ -571,8 +571,8 @@ end;
    ans first, then, unless a complete function gave them or the kind is
    kNone, the names that fit as how says. How many bytes of p the names
    leave out. *)
-proc gather(p: []U8; cx: Cedit.Context; how: How; kind: Kind; given: BOOL; ans: []Ccore.Val; var out: Vals.Vec): INT;
-var b: Buf.Buf; names, homes: Names.Vec; g: []Cvars.Var; procs: []^Csyntax.Stmt; nm: [][]U8; i, s: INT; show: Show;
+proc gather(p: []const U8; cx: Cedit.Context; how: How; kind: Kind; given: BOOL; ans: []Ccore.Val; var out: Vals.Vec): INT;
+var b: Buf.Buf; names, homes: Names.Vec; g: []Cvars.Var; procs: []^Csyntax.Stmt; nm: [][]const U8; i, s: INT; show: Show;
 begin
     (* a complete function's words stand alone; a file's may not *)
     for i := 0 to LEN(ans) - 1 do offer(Ccore.bytes(ans[i]), p, how, out); end;
@@ -636,7 +636,7 @@ end;
 (* What the unquoted word p might become in the context cx, after the
    command's words, added to out; ask is the user's complete function.
    True if out is ranked, best first, for nothing started with p. *)
-proc complete*(p: []U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec; ask: Asker): BOOL;
+proc complete*(p: []const U8; cx: Cedit.Context; words: []Ccore.Val; var out: Vals.Vec; ask: Asker): BOOL;
 var ans, lines: Vals.Vec; b: Buf.Buf; a: []Ccore.Val; kind: Kind; off, at, skip, i: INT; given, r: BOOL;
 begin
     Vals.init(ans, Ccore.temps);

@@ -15,7 +15,7 @@ type
     Kind* = (none, file, dir);    (* what a path names; file is anything but a directory *)
 
 (* The class at p[i] = '[': where it ends, and whether c is in it. *)
-proc classEnd(p: []U8; i: INT; c: U8): (INT, BOOL);
+proc classEnd(p: []const U8; i: INT; c: U8): (INT, BOOL);
 var j: INT; neg, first, hit: BOOL;
 begin
     j := i + 1;
@@ -39,7 +39,7 @@ begin
 end;
 
 (* Does the pattern p match all of s? *)
-proc matches*(p, s: []U8): BOOL;
+proc matches*(p, s: []const U8): BOOL;
 var pi, si, star, from, k: INT; hit: BOOL;
 begin
     star := -1;
@@ -86,7 +86,7 @@ begin
 end;
 
 (* Does p hold a *, ? or [ not escaped? *)
-proc hasMeta*(p: []U8): BOOL;
+proc hasMeta*(p: []const U8): BOOL;
 var i: INT;
 begin
     i := 0;
@@ -102,7 +102,7 @@ begin
 end;
 
 (* p added to b without its escapes. *)
-proc addUnescaped(var b: Buf.Buf; p: []U8);
+proc addUnescaped(var b: Buf.Buf; p: []const U8);
 var i: INT;
 begin
     i := 0;
@@ -114,7 +114,7 @@ begin
 end;
 
 (* What path names, following links. *)
-proc pathKind*(path: []U8): Kind;
+proc pathKind*(path: []const U8): Kind;
 var f: Sys.Info; err: INT;
 begin
     f, err := Sys.info(path);
@@ -134,8 +134,8 @@ end;
 
 (* The paths under pre, which ends in / or is empty, that match the
    rest of a pattern, p, added to out. *)
-proc globIn(var pre: Buf.Buf; p: []U8; var out: Vals.Vec);
-var b: Buf.Buf; d: Sys.Dir; from, nm: []U8; i, r: INT; slash, ok: BOOL;
+proc globIn(var pre: Buf.Buf; p: []const U8; var out: Vals.Vec);
+var b: Buf.Buf; d: Sys.Dir; from, nm: []const U8; i, r: INT; slash, ok: BOOL;
 begin
     i := 0;
     while (i < LEN(p)) and (p[i] # '/') do INC(i); end;
@@ -174,7 +174,7 @@ begin
 end;
 
 (* The paths that match the pattern pat, sorted, added to out: how many. *)
-proc glob*(pat: []U8; var out: Vals.Vec): INT;
+proc glob*(pat: []const U8; var out: Vals.Vec): INT;
 var pre: Buf.Buf; a: []Ccore.Val; t: Ccore.Val; start, i, j: INT;
 begin
     start := out.len;
