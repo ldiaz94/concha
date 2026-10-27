@@ -28,7 +28,7 @@ is the port before this one, and the model for it.
 - Modules keep the Pascal units' jobs and order, each named with a `C`:
   `Ccore`, `Csyntax`, `Cedit`, `Cinterp`, `Concha`; `Cfuzzy`
   is what the Pascal took from fuzzy(3), and local time, hora(3)'s
-  part, is rzone's `Zone` (`~/r/rzone`, by `-I`);
+  part, is rzone's `Zone` (`~/r/rzone`, installed in `~/.raz/lib`);
   `Cvars`, `Cglob`, `Cclock` and `Ccomplete` are the parts of
   `interp.pas` that depend on the rest one way only.
 - Idiomatic raz, not Pascal transcribed: an error is an `ERROR`

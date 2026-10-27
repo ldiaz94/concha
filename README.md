@@ -48,14 +48,14 @@ there is nothing to quote.
 concha is written in [raz](https://raz.lucelad.workers.dev), and builds
 with the version the `Makefile` names (`RAZVERSION`); `make` warns if
 the `raz` on your `PATH` is another. It needs
-[rzone](https://github.com/ldiaz94/rzone), for local time, beside it
-(`../rzone`, or wherever `RZONE` says).
+[rzone](https://github.com/ldiaz94/rzone), for local time, installed first
+with `make install` in its checkout (it goes to `~/.raz/lib`).
 
     make                # build/concha
     make test           # the self-test, the examples, the man pages
     make install        # concha, three man pages and the examples, into ~/.local
 
-`PREFIX`, `DESTDIR`, `BINDIR`, `MANDIR`, `DATADIR`, `RAZ` and `RZONE` can be set
+`PREFIX`, `DESTDIR`, `BINDIR`, `MANDIR`, `DATADIR` and `RAZ` can be set
 on the command line; see the `Makefile`.
 
     concha                     interactive; reads ~/.concharc first
