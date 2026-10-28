@@ -6,6 +6,7 @@
      concha -n [file]       parse only, run nothing
      concha -q kind file    answer an editor: check, outline, words, def
      concha -h | --help     print the usage
+     concha --version       print the version
      ... | concha           run standard input
 
    A script runs to its end, or to its first error, which ends the
@@ -26,7 +27,8 @@ module Concha;
 import Sys, Files, Fmt, Buf, Heap, Ccore, Csyntax, Cvars, Cedit, Ccomplete, Cinterp;
 
 const
-    Usage = "usage: concha [-il]\n       concha script [arg ...]\n       concha -c text [arg ...]\n       concha -n [script]\n       concha -q check|outline|words|def script\n       concha -h | --help\n";
+    Usage = "usage: concha [-il]\n       concha script [arg ...]\n       concha -c text [arg ...]\n       concha -n [script]\n       concha -q check|outline|words|def script\n       concha -h | --help\n       concha --version\n";
+    Version = "concha 1.0.0\n";    (* as the release is tagged, v1.0.0 *)
     QueryUsage = "usage: concha -q check|outline|words|def script\n";
 
     (* The colours a prompt may use, as variables of these names *)
@@ -542,6 +544,10 @@ begin
     a, forceI := options();
     if isHelp(a) then
         Ccore.put(1, Usage);
+        Sys.exit(0);
+    end;
+    if (a < ARGC()) and (Files.arg(a) = "--version") then
+        Ccore.put(1, Version);
         Sys.exit(0);
     end;
     Buf.init(line, Heap.heap);

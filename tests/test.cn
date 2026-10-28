@@ -646,6 +646,7 @@ check('-q unknown kind', `$cn -q nosuch $qdir/good.cn 2>&1; echo $status`,
 check('-q no script', `$cn -q check 2>/dev/null; echo $status`, '2')
 check('-q unreadable', `$cn -q check $qdir/none.cn 2>/dev/null; echo $status`, '2')
 check('usage names -q', '-q check' in `$cn --help`, true)
+check('version', `$cn --version`, 'concha 1.0.0')
 
 { -q outline: procs and funcs at any depth, vars outside them }
 writeln('var a := 1, b'#10'export E := "x"'#10'procedure outer(x)'#10 +
