@@ -1025,17 +1025,19 @@ end;
    parameters, args, the whole list, and for a function result, which
    is what it answers. *)
 proc callProc(def: ^Csyntax.Stmt; args: []Ccore.Val): (Ccore.Val, ERROR);
-var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i, outer: INT; err: ERROR;
+var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i, outer: INT; named: BOOL; err: ERROR;
 begin
     f := try Cvars.enter();
     up := curFunc;
     at := Ccore.where^;
     curFunc := def;
+    named := false;    (* a parameter called args wins over the list *)
     for i := 0 to LEN(def^.params) - 1 do
         r := Cvars.local(def^.params[i]);
         if i < LEN(args) then r^.v := Ccore.keep(args[i]); end;
+        named := named or (def^.params[i] = "args");
     end;
-    Cvars.local("args")^.v := Ccore.keep(listOf(args));
+    if not named then Cvars.local("args")^.v := Ccore.keep(listOf(args)); end;
     if def^.isFunc then _ := Cvars.local("result"); end;
     outer := bodySt;
     bodySt := 0;

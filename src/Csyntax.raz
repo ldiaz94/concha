@@ -1105,6 +1105,10 @@ begin
             if stop > LEN(src) then stop := LEN(src); end;
             break;
         end;
+        if (inBack > 0) and (j - ls - ind = LEN(tag) + 1) and (src[j - 1] = '`') and (src[ls + ind..j - 1] = tag) then
+            stop := j - 1;    (* the tag, then the capture's closing ` *)
+            break;
+        end;
         if j >= LEN(src) then
             pos := LEN(src);
             return [], synErrAt(tp, line, "unterminated heredoc");
@@ -1380,6 +1384,19 @@ begin
     return nil;
 end;
 
+(* The end of a statement next, after blanks: a new line, ;, the end of
+   the text, or what closes the list it is in. An assignment's
+   expression ends where it does, so what follows must be one of these. *)
+proc stmtEnd: ERROR;
+begin
+    try blank(false);
+    if (ch() = 0) or (ch() = '\n') or (ch() = ';') then return nil; end;
+    if wordIs(pos, "end") or wordIs(pos, "else") or wordIs(pos, "until") or wordIs(pos, "otherwise") then return nil; end;
+    if (ch() = '`') and (inBack > 0) or (ch() = ')') and inSub then return nil; end;
+    if identEnd(pos) > pos then return synErr(unexpected(src[pos..identEnd(pos)])); end;
+    return synErr(unexpected(src[pos..pos + 1]));
+end;
+
 (* A := next, passed if it is. *)
 proc isAssign: (BOOL, ERROR);
 begin
@@ -1423,6 +1440,7 @@ begin
         adv;
     end;
     blk^.list := Stmts.all(v);
+    try stmtEnd();
     return blk, nil;
 end;
 
@@ -1440,7 +1458,7 @@ end;
 (* A procedure or a function, from after its keyword. Its body is a block
    of its var declarations, then the block between begin and end. *)
 proc parseProc(isFunc: BOOL): (^Stmt, ERROR);
-var s, pre, x: ^Stmt; o, up: ^OutItem; ps: Names.Vec; v: Stmts.Vec;
+var s, pre, x: ^Stmt; o, up: ^OutItem; ps: Names.Vec; v: Stmts.Vec; inVar: BOOL;
 begin
     s := newStmt(sProc);
     s^.isFunc := isFunc;
@@ -1473,15 +1491,21 @@ begin
     if ch() = ';' then adv; end;
     pre := newStmt(sBlock);
     Stmts.init(v, Heap.heap);
-    if try acceptKw("var") then
-        repeat
-            (* the names may start on the line after var, as in Pascal *)
-            try blank(true);
+    inVar := false;
+    while true do    (* var sections and nested procedures, in any order *)
+        try blank(true);
+        if ch() = ';' then
+            adv;
+        elsif wordIs(pos, "procedure") or wordIs(pos, "function") then
+            Stmts.push(v, try parseStmt());
+            inVar := false;
+        elsif try acceptKw("var") then
+            inVar := true;    (* the names may start on the next line, as in Pascal *)
+        elsif inVar and isIdStart(ch()) and not wordIs(pos, "begin") then
             Stmts.push(v, try decls(sVar));
-            try blank(true);
-            if ch() = ';' then adv; end;
-            try blank(true);
-        until wordIs(pos, "begin") or not (isIdStart(ch()) or try acceptKw("var"));
+        else
+            break;
+        end;
     end;
     try expectKw("begin");
     x := newStmt(sBlock);
@@ -1606,6 +1630,7 @@ begin
     end;
     _ := try isAssign();
     s^.e := try exprRaw();
+    try stmtEnd();
     return s, nil;
 end;
 

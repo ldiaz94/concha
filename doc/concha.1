@@ -383,7 +383,11 @@ behaves the same way.
 .Pp
 A heredoc's body starts on the line after the command and ends at a
 line holding only
-.Ar tag .
+.Ar tag ,
+or, in a capture, only
+.Ar tag
+and the closing
+.Cm ` .
 The terminator may be indented: whatever indentation precedes it is
 also removed from every line of the body.
 The body expands
@@ -610,6 +614,13 @@ begin
 end;
 .Ed
 .Pp
+Before
+.Cm begin ,
+.Cm var
+sections and nested routines may come in any order.
+A nested routine is defined when the outer one is called, and is as
+global as any other.
+.Pp
 A routine is defined when its definition runs, and defining it again
 replaces it.
 Calls can be Pascal style,
@@ -637,7 +648,8 @@ passes the value unchanged.
 Missing parameters are
 .Cm nil .
 Every call also receives the full argument list in the local variable
-.Ev args .
+.Ev args ,
+unless a parameter is called that.
 .Pp
 Inside a routine, new variables are local.
 Assigning to an existing global changes the global.
