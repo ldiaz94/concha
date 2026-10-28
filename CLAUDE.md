@@ -36,8 +36,6 @@ on PATH, of the version `RAZVERSION` in the Makefile says.
 - Readability first. Each module opens with what it is, what it
   depends on and what it leaves out; comments say why. A comment must
   not hold `*)`.
-- What raz lacks, or makes awkward, goes in `RAZ-NOTES.md`, for raz's
-  owner; it is not worked around quietly.
 - Commits: author `Luis <42945842+ldiaz94@users.noreply.github.com>`,
   unsigned (`--no-gpg-sign`), no attribution trailer. Pushed to `main`
   of `ldiaz94/concha` once that repository exists. No pull requests
