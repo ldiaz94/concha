@@ -269,6 +269,8 @@ check('procsub errexit ignores', `$cn -c 'errexit := true; cat <(false); echo on
 check('exec command', `exec echo hi`, 'hi')
 var execf := '/tmp/concha_test_exec'
 check('exec fd', `exec 3> $execf; echo x >&3; cat $execf`, 'x')
+check('fd passed on', `cat /dev/fd/4 4< $execf`, 'x')
+check('exec keeps a <(...)', `timeout 5 $cn -c 'exec 3< <(head -c 200000 /dev/zero); wc -c < /dev/fd/3'`, '200000')
 check('exec redirects shell', `$cn -c "exec > $execf; echo y"; cat $execf`, 'y')
 rm -f $execf
 check('exec not found', `exec nosuchcmd 2>&1; writeln(status)`, 'concha: nosuchcmd: not found'#10'127')

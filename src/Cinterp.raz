@@ -127,6 +127,7 @@ var
     tailOk: BOOL;    (* the next command may exec over this process *)
     intSeen: BOOL;    (* waitFor let a Ctrl-C pass *)
     keepFds: BOOL;    (* exec with no command: its redirections stay *)
+    subsKept: BOOL;    (* and so do the <(...)s it opened, not waited for *)
     exempt: INT;    (* above 0, a failure doesn't trigger errexit *)
     inPromptProc: BOOL;    (* the prompt procedure runs *)
     chainSkipped: BOOL;    (* the last pipeline of the chain didn't run *)
@@ -347,7 +348,10 @@ end;
 (* src moved to dst, dst saved first if save. *)
 proc place(src, dst: INT; save: BOOL): ERROR;
 begin
-    if src = dst then return nil; end;
+    if src = dst then    (* opened where it goes, closed on exec as open makes it *)
+        _ := Sys.keepOnExec(dst, true);
+        return nil;
+    end;
     if save then try saveFd(dst); end;
     _ := Sys.dupTo(src, dst);
     Sys.close(src);
@@ -852,7 +856,7 @@ end;
    first list leads the job's group and the rest join it, so that what
    the command runs joins it too, and all of them get the terminal. *)
 proc openSub(l: []^Csyntax.Stmt): (Ccore.Val, ERROR);
-var r, w, pid, i: INT; grp: BOOL;
+var r, w, pid, i, k: INT; grp: BOOL;
 begin
     if nsub >= MaxSubs then return {}, Ccore.fail("too many <(...)"); end;
     r, w := Sys.pipe();
@@ -867,6 +871,11 @@ begin
         runInto(l, w);
     end;
     Sys.close(w);
+    k := Sys.dupAbove(r, 10);    (* out of the way of the fds a script names, as 3< /dev/fd/N *)
+    if k >= 0 then
+        Sys.close(r);
+        r := k;
+    end;
     _ := Sys.keepOnExec(r, true);
     subs[nsub] := {fd: r, pid: pid};
     if grp then
@@ -882,11 +891,13 @@ end;
    status counts for nothing. Closing first lets a list still writing
    die of SIGPIPE rather than wait. One that has stopped wants the
    terminal its command has given back, and nobody will read what it
-   writes: it is ended. *)
-proc closeSubs(lvl: INT);
+   writes: it is ended. If not wait, the lists run on, reaped as jobs
+   are (reapJobs): an exec has kept what they write to be read later. *)
+proc closeSubs(lvl: INT; wait: BOOL);
 var e: Ended; i, r: INT;
 begin
     for i := lvl to nsub - 1 do Sys.close(subs[i].fd); end;
+    if not wait then nsub := lvl; return; end;
     for i := lvl to nsub - 1 do
         while subs[i].pid > 0 do
             r, e.how, e.n := Sys.wait(subs[i].pid, true);
@@ -1329,7 +1340,7 @@ begin
     err := source(path);
     if err = nil then return Cvars.status(), nil; end;
     restoreFds(lvl);
-    closeSubs(ns);
+    closeSubs(ns, true);
     Cvars.leave(f);
     curFunc := up;
     exempt := ex;
@@ -2476,6 +2487,7 @@ begin
     r := 1;
     ok, err := redirect(st.rx, true);
     if ok and (err = nil) then r, err := inProc(c, st); end;
+    subsKept := keepFds and (err = nil);
     if keepFds and (err = nil) then commitFds(lvl); else restoreFds(lvl); end;
     keepFds := false;
     return r, err;
@@ -2562,7 +2574,8 @@ begin
     subSt := nil;
     subAll := LEN(p.cmds) > 1;
     if LEN(p.cmds) = 1 then r, err := runSingle(p.cmds[0], tail); else r, err := runMulti(p.cmds); end;
-    closeSubs(lvl);
+    closeSubs(lvl, not subsKept);
+    subsKept := false;
     subPg := sPg;
     subSt := sSt;
     subAll := sAll;
@@ -2911,7 +2924,7 @@ end;
 proc recover*;
 begin
     restoreFds(0);
-    closeSubs(0);
+    closeSubs(0, true);
     Cvars.leave({});
     curFunc := nil;
     ctl := cNone;
@@ -2963,7 +2976,7 @@ begin
         if err = nil then r, err := callProc(def, one); end;
         if err # nil then
             r := {};
-            closeSubs(ns);
+            closeSubs(ns, true);
             Cvars.leave(f);
             curFunc := up;
             exempt := ex;
