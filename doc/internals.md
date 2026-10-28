@@ -21,8 +21,8 @@ It was ported from a Free Pascal concha, a module for each of its units
 and in their order; `Cfuzzy` and `Czone` are what that one took from
 outside (fuzzy(3), hora(3)), and `Cvars`, `Cglob`, `Cclock` and
 `Ccomplete` the parts of its interpreter that depend on the rest one way
-only. `PLAN.md` tells the port, and the few differences from the Pascal
-that were meant.
+only. "From the Pascal", at the end, lists the differences that were
+meant.
 
 Everything goes through raz's library: `Sys` for the system calls (the
 terminal, process groups, signals, limits, and execve, which leaves an
@@ -415,3 +415,39 @@ in case a `prompt` procedure fails while the editor is redrawing.
 
 `test.cn` checks each usage against the rendered `concha.1`, so the man
 page needs its line too.
+
+## From the Pascal
+
+The port kept the language as it was. What differs from the Pascal
+concha, on purpose:
+
+- **Wide characters.** The editor counts a character's columns by
+  raz's `Width`, so a CJK character or an emoji takes two and the
+  cursor stays where it is drawn; the Pascal counted one a character.
+- **A complete function that fails** puts back what it changed, the
+  frames and the fds above where it started, where the Pascal reset
+  the whole shell: from `completions()` in a procedure, the procedure
+  goes on with its own variables.
+- **A prompt procedure that fails on ctrl-l** gives way to the plain
+  prompt, and the line being typed stays; the Pascal dropped the line.
+- **ctrl-x ctrl-e's editor**, stopped with Ctrl-Z or not started for
+  want of a fork, ends the edit with the line as the file holds it;
+  the Pascal dropped the line.
+- **Local time is rzone's.** `Czone` gave way to `~/r/rzone`'s
+  `Zone`, which reads `TZ` as the C library does: `TZ` empty is UTC
+  (it was `/etc/localtime`), `TZDIR` is looked in for a name, `TZ`
+  that names no file is read as a POSIX rule (`EST5EDT,M3.2.0,M11.1.0`;
+  it was UTC), and an abbreviation is no longer cut to 7 bytes.
+- **type and help**, two builtins the Pascal lacked: `type name`
+  says what a command word is and where a procedure was declared;
+  `help name` prints a procedure's heading and the comment above it,
+  or a builtin's usage. They are in `-q words` and completion too.
+  So that help finds a procedure's file wherever the shell has gone
+  since, an error in `~/.concharc` names it in full
+  (`/home/luis/.concharc:12`, it was `.concharc:12`).
+- **ctrl-r matches fuzzily**, as completion does: a history line
+  matches when the query's letters come in it in order, and the best
+  match by `Cfuzzy`'s score comes first, the newest of equals; ctrl-r
+  goes to the next best, and a line already shown is passed over. The
+  Pascal took the newest line holding the query whole, with the cursor
+  on it; now the cursor is at the end.

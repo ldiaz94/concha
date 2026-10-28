@@ -1,13 +1,11 @@
 # Working on concha
 
 concha is a Unix shell whose scripting language is Pascal, written in
-raz. It is being ported from Free Pascal (`~/lib/concha`, frozen at
-`8eb7b3d`: never work there). Read `PLAN.md` first: the port, a module
-to a step, and the handover that replaces the Pascal concha. The
+raz. It was ported from Free Pascal (`~/lib/concha`, frozen at
+`8eb7b3d`: never work there); `doc/internals.md` tells its insides. The
 language is defined by raz's report (`man raz`, `~/r/raz/doc/raz.md`,
 the library `~/r/raz/doc/raz-lib.md`); the program builds with the raz
-on PATH, of the version `RAZVERSION` in the Makefile says. `~/r/sauce`
-is the port before this one, and the model for it.
+on PATH, of the version `RAZVERSION` in the Makefile says.
 
 ## Setup and checks
 
@@ -23,8 +21,8 @@ is the port before this one, and the model for it.
 
 - The language concha takes stays what it is: every script and
   `~/.concharc` must keep working, and the `-q` queries keep their
-  output, which concha-lsp reads. A difference is a bug, unless
-  `PLAN.md` lists it as meant.
+  output, which concha-lsp reads. A change to it is made on purpose
+  and listed in `doc/internals.md` ("From the Pascal").
 - Modules keep the Pascal units' jobs and order, each named with a `C`:
   `Ccore`, `Csyntax`, `Cedit`, `Cinterp`, `Concha`; `Cfuzzy`
   is what the Pascal took from fuzzy(3), and local time, hora(3)'s

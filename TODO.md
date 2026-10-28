@@ -1,6 +1,6 @@
 # TODO
 
-Findings for the user to schedule; not part of PLAN.md.
+Findings for the user to schedule.
 
 - `exec 3< <(list)`: after the command the shell waits for the list,
   which blocks while the list still has more to write than the pipe

@@ -240,4 +240,4 @@ About 9,800 lines of raz, with nothing under them but raz's library: no
 libc. Scratch values live in an arena that is released after every
 statement, so memory stays flat in long loops. concha was first written
 in Free Pascal, and ported to raz with its language kept exactly as it
-was; [PLAN.md](PLAN.md) tells how. ISC licence.
+was; [doc/internals.md](doc/internals.md) tells how. ISC licence.
