@@ -66,8 +66,8 @@ type
 
     Builtin* = (
         bNone, bWrite, bWriteln, bReadln, bInc, bDec, bHalt, bLength, bCopy, bPos, bInt, bStr,
-        bTrim, bSplit, bJoin, bLines, bGlob, bExists, bIsDir, bIsFile, bChr, bOrd, bUpcase,
-        bLowcase, bMatch, bDefined, bReplace, bSort, bEnviron, bGetenv, bSetenv, bNow, bTime,
+        bTrim, bSplit, bJoin, bLines, bGlob, bExists, bIsDir, bIsFile, bChr, bOrd, bUnicode,
+        bChars, bHex, bUpcase, bLowcase, bMatch, bDefined, bReplace, bSort, bEnviron, bGetenv, bSetenv, bNow, bTime,
         bBasename, bDirname, bCompletions
     );
     Op* = (oNone, oAdd, oSub, oMul, oDiv, oMod, oAnd, oOr, oXor, oEq, oNe, oLt, oGt, oLe, oGe, oIn);
@@ -165,6 +165,9 @@ const
         {name: "isfile", usage: "isfile(p)"},
         {name: "chr", usage: "chr(n)"},
         {name: "ord", usage: "ord(s)"},
+        {name: "unicode", usage: "unicode(s)"},
+        {name: "chars", usage: "chars(s)"},
+        {name: "hex", usage: "hex(n[, w])"},
         {name: "upcase", usage: "upcase(s)"},
         {name: "lowcase", usage: "lowcase(s)"},
         {name: "match", usage: "match(s, pattern)"},

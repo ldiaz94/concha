@@ -451,3 +451,13 @@ concha, on purpose:
   goes to the next best, and a line already shown is passed over. The
   Pascal took the newest line holding the query whole, with the cursor
   on it; now the cursor is at the end.
+- **A call statement has a status of its own** (2026-10-28): a
+  builtin's is 0, a procedure's that of the last command statement it
+  ran. The Pascal let a call keep whatever status came before it, so a
+  failed capture ended an errexit script at the next `writeln`. errexit
+  now names the command, file and line.
+- **Stricter parsing** (2026-10-28): an assignment must end its
+  statement (`x := 1 echo hi` is an error), and a procedure may be
+  declared among a procedure's `var` sections.
+- **unicode, chars and hex**, three builtins the Pascal lacked; `ord`
+  and `chr` still work on bytes.

@@ -985,7 +985,34 @@ or 0.
 .It Fn int x , Fn str x
 Convert.
 .It Fn chr n , Fn ord s
-Character code conversions.
+A byte and its value, 0 to 255: for n of 256 or more,
+.Fn chr
+keeps the low 8 bits, and
+.Fn ord
+gives the first byte of
+.Ar s .
+.It Fn unicode s
+The code point of the first UTF-8 character of
+.Ar s :
+.Ql unicode('\['e]')
+is 233.
+A byte that does not begin a character gives 65533.
+.It Fn chars s
+The list of the UTF-8 characters of
+.Ar s ,
+so
+.Ql length(chars(s))
+counts characters where
+.Ql length(s)
+counts bytes.
+A byte that is not UTF-8 is a character of its own.
+.It Fn hex "n[, w]"
+.Ar n ,
+not negative, in hexadecimal capitals, with zeros before it to make
+.Ar w
+digits:
+.Ql "'\eu' + hex(unicode(c), 4)"
+writes a JSON escape.
 .It Fn upcase s , Fn lowcase s
 Change ASCII case.
 .It Fn replace "s, old, new"

@@ -176,7 +176,7 @@ the script with `concha: f.cn:12: errexit: grep -q x (status 1)`.
   answers false at the end of input. A `write` used as a command writes
   to the command's standard output, so `writeln(x) > file` works.
 - **Strings and lists:** `length copy pos int str chr ord upcase
-  lowcase trim`, `split(s[, sep]) join(l[, sep]) lines(s)
+  lowcase trim`, `unicode(s) chars(s) hex(n[, w])` for UTF-8 and hex, `split(s[, sep]) join(l[, sep]) lines(s)
   replace(s, old, new) sort(l)`, `glob(pattern) match(s, pattern)`.
 - **Files:** `exists(p) isdir(p) isfile(p) basename(p[, suffix])
   dirname(p)`.

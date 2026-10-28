@@ -2197,7 +2197,7 @@ end;
 proc builtin(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
 var
     a, b, c: []const U8; v: Ccore.Val; buf: Buf.Buf; out: Vals.Vec; x: ^Csyntax.Expr; r: ^Cvars.Var; g: []Cvars.Var;
-    n, i, k: INT; ia, ib: I64; got: BOOL;
+    n, i, k: INT; ia, ib: I64; cp: I32; got: BOOL;
 begin
     match e^.bi of
     | bWrite, bWriteln:
@@ -2303,6 +2303,34 @@ begin
         a := try argStr(e, 0);
         if LEN(a) = 0 then return {}, Ccore.fail("ord of empty string"); end;
         return Ccore.intVal(I64(a[0])), nil;
+    | bUnicode:    (* ord's, of a whole UTF-8 character *)
+        _ := try need(e, 1, 1);
+        a := try argStr(e, 0);
+        if LEN(a) = 0 then return {}, Ccore.fail("unicode of empty string"); end;
+        cp, _ := Str.decode(a);
+        return Ccore.intVal(I64(cp)), nil;
+    | bChars:    (* a byte that is no UTF-8 is a character of its own *)
+        _ := try need(e, 1, 1);
+        a := try argStr(e, 0);
+        Vals.init(out, Ccore.temps);
+        i := 0;
+        while i < LEN(a) do
+            _, k := Str.decode(a[i..LEN(a)]);
+            Vals.push(out, Ccore.strVal(a[i..i + k]));
+            INC(i, k);
+        end;
+        return Ccore.listVal(out), nil;
+    | bHex:
+        n := try need(e, 1, 2);
+        ia := try Ccore.toInt(try eval(e^.args[0]));
+        if ia < 0 then return {}, Ccore.fail("hex of a negative number"); end;
+        k := 1;
+        if n = 2 then k := INT(try Ccore.toInt(try eval(e^.args[1]))); end;
+        a := Ccore.text("{}", [Fmt.hex(U64(ia))]);
+        Buf.init(buf, Ccore.temps);
+        for i := LEN(a) to k - 1 do Buf.add(buf, '0'); end;    (* zeros to w digits *)
+        Buf.str(buf, a);
+        return Ccore.bufVal(buf), nil;
     | bUpcase, bLowcase:
         _ := try need(e, 1, 1);
         v := Ccore.strVal(try argStr(e, 0));
