@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
+<title>concha: a Unix shell whose scripting language is Pascal</title>
+<defs>
+<linearGradient id="concha-banner-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2b2433"/><stop offset="1" stop-color="#0f0b14"/></linearGradient>
+<linearGradient id="concha-card" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2b2433"/><stop offset="1" stop-color="#14101a"/></linearGradient>
+<linearGradient id="concha-shell" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fdf0d8"/><stop offset="1" stop-color="#efc190"/></linearGradient>
+</defs>
+<rect width="800" height="200" rx="20" fill="url(#concha-banner-bg)"/>
+<!-- faint whorl rings behind the shell -->
+<g fill="none" stroke="#f4a58a" stroke-opacity="0.10" stroke-width="2"><circle cx="100" cy="100" r="96"/><circle cx="100" cy="100" r="130"/><circle cx="100" cy="100" r="170"/></g>
+<!-- the logo -->
+<g transform="translate(36 36)">
+<rect x="2" y="2" width="124" height="124" rx="22" fill="url(#concha-card)" stroke="#4a3d57" stroke-width="2"/>
+<g transform="translate(64 64) rotate(38) scale(0.88) translate(-64 -64)" stroke-linejoin="round" stroke-linecap="round">
+<!-- shell: pointed spire on top, wide body, short canal at the foot -->
+<path d="M64 8 L76 36 Q94 44 99 68 Q102 94 80 106 Q70 112 64 120 Q58 112 48 106 Q26 94 29 68 Q34 44 52 36 Z" fill="url(#concha-shell)" stroke="#f4a58a" stroke-width="4"/>
+<!-- sutures between the whorls of the spire -->
+<path d="M57 22 Q64 26 71 22 M52 36 Q64 41 76 36" fill="none" stroke="#f08a6b" stroke-width="3.5"/>
+<!-- a ridge winding round the body -->
+<path d="M36 70 Q40 52 56 46" fill="none" stroke="#f08a6b" stroke-width="3.5"/>
+<!-- aperture with its flared lip -->
+<path d="M66 54 Q90 56 90 82 Q88 100 70 104 Q56 96 56 78 Q56 62 66 54 Z" fill="#2b2433" stroke="#f08a6b" stroke-width="4"/>
+<!-- the prompt, turned back upright -->
+<g transform="rotate(-38 73 82)" fill="none" stroke="#fdf0d8" stroke-width="5"><path d="M63 71 L74 81 L63 91"/><path d="M78 92 H85"/></g>
+</g>
+</g>
+<text x="200" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="76" font-weight="700" fill="#fdf0d8">concha</text>
+<text x="203" y="152" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" fill="#efc190">a Unix shell whose scripting language is Pascal</text>
+</svg>

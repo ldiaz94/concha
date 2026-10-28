@@ -12,6 +12,7 @@ on PATH, of the version `RAZVERSION` in the Makefile says.
     make            # build/concha
     make test       # tests/test.cn under build/concha, the examples, the man pages
     make fmt        # src/ is laid out as raz's formatter lays it out
+    make cast       # doc/demo.cast and doc/img/demo.gif, from doc/demo.keys
     make install    # ~/.local (PREFIX=...)
 
 `make fmt` must pass before every commit, and the build with

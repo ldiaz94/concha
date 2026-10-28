@@ -1,25 +1,24 @@
 # concha internals
 
-concha is written in raz (`man raz`), in eleven modules, each depending
+concha is written in raz (`man raz`), in ten modules, each depending
 only on those above it in this table:
 
 | module | lines | job |
 |--------|-------|-----|
 | `Ccore` | ~610 | arena, values, errors, output, files, the distance between names |
-| `Csyntax` | ~1780 | scanner, parser, syntax tree, the notes the queries read |
+| `Csyntax` | ~1830 | scanner, parser, syntax tree, the notes the queries read |
 | `Cfuzzy` | ~120 | wuzzy's fuzzy matcher, which ranks completions |
-| `Czone` | ~520 | the time zone's offset and abbreviation at an instant |
-| `Cedit` | ~1930 | line editor, history, highlighting, the menu |
+| `Cedit` | ~1950 | line editor, history, highlighting, the menu |
 | `Cvars` | ~460 | variables, procedures, "did you mean", `~user`, `PATH` |
 | `Cglob` | ~200 | patterns and globbing |
-| `Cclock` | ~130 | `time()`'s format |
+| `Cclock` | ~100 | `time()`'s format |
 | `Ccomplete` | ~690 | completion, and the concha-complete(5) files |
-| `Cinterp` | ~2770 | evaluator, expansion, processes, jobs, signals, builtins |
-| `Concha` | ~580 | command line, the queries, the REPL, startup |
+| `Cinterp` | ~3130 | evaluator, expansion, processes, jobs, signals, builtins |
+| `Concha` | ~590 | command line, the queries, the REPL, startup |
 
 It was ported from a Free Pascal concha, a module for each of its units
-and in their order; `Cfuzzy` and `Czone` are what that one took from
-outside (fuzzy(3), hora(3)), and `Cvars`, `Cglob`, `Cclock` and
+and in their order; `Cfuzzy` is what that one took from
+fuzzy(3), local time is rzone's `Zone` (hora(3)'s part), and `Cvars`, `Cglob`, `Cclock` and
 `Ccomplete` the parts of its interpreter that depend on the rest one way
 only. "From the Pascal", at the end, lists the differences that were
 meant.

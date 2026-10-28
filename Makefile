@@ -10,7 +10,8 @@
 #                     has no program yet
 #   make test         tests/test.cn under build/concha, the examples checked,
 #                     the man pages checked
-#   make fmt          src/ is laid out as raz's formatter lays it out
+#   make fmt          src/ and tests/Play.raz are laid out as raz's formatter lays them out
+#   make cast         doc/demo.cast and doc/img/demo.gif made again
 #   make install      the program, its manual pages and examples (PREFIX=...)
 #   make uninstall    exactly what install put there
 
@@ -53,9 +54,19 @@ test: build/concha man
 fmt:
 	@mkdir -p build
 	$(RAZ) -o build/Pretty $(RAZTOOLS)/Pretty.raz
-	@fail=0; for f in $(SRC); do \
+	@fail=0; for f in $(SRC) tests/Play.raz; do \
 	    build/Pretty $$f | cmp -s - $$f || { echo "not formatted: $$f"; fail=1; }; \
 	done; test $$fail = 0
+
+# The pseudo-terminal player, for the cast.
+build/play: tests/Play.raz
+	@mkdir -p build
+	$(RAZ) -Werror -o build/play tests/Play.raz
+
+# Regenerate the asciinema cast and the demo GIF; needs tmux,
+# rsvg-convert and ffmpeg, and the DejaVu Sans Mono font.
+cast: build/concha build/play
+	build/concha tests/cast.cn
 
 man:
 	for p in $(MAN); do groff -mdoc -ww -z $$p || exit 1; done
@@ -84,4 +95,4 @@ uninstall:
 clean:
 	rm -rf build
 
-.PHONY: all modules test fmt man loc install uninstall clean
+.PHONY: all modules test fmt cast man loc install uninstall clean

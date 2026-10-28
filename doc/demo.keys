@@ -1,0 +1,11 @@
+<wait 1000>
+ls<wait 900><Enter><wait 1800>
+n := int(`grep -c ERROR app.log`)<wait 700><Enter><wait 600>
+writeln('errors: ', n, ', doubled: ', n * 2)<wait 700><Enter><wait 2000>
+for f in glob('*.log') do<wait 500><Enter><wait 400>
+writeln(f, ': ', int(`grep -c ERROR $f`))<wait 500><Enter><wait 400><Enter><wait 2200>
+ehco hi<wait 700><Enter><wait 2000>
+<Right><wait 900><Enter><wait 1800>
+cat no<wait 400><Tab><wait 900><Tab><wait 1800>
+t<wait 500><Tab><wait 900><Enter><wait 2200>
+exit<wait 400><Enter>

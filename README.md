@@ -1,10 +1,13 @@
-# concha
+<p align="center">
+  <img src="doc/img/banner.svg" alt="concha: a Unix shell whose scripting language is Pascal" width="800">
+</p>
 
-**A Unix shell whose scripting language is Pascal.**
-
-Commands are commands, and everything around them is Pascal: real
-variables, real conditions, real functions. No word splitting, no quote
-mazes, no `[ ... ]`.
+**concha** is a Unix shell whose scripting language is Pascal. Commands
+are commands, and everything around them is Pascal: real variables,
+real conditions, real functions. There is no word splitting, no quote
+maze and no `[ ... ]`. At the prompt it has a line editor of its own
+that knows the language: it highlights as you type, suggests from
+history, completes with a menu and says "did you mean".
 
 <table>
 <tr><th>sh</th><th>concha</th></tr>
@@ -39,11 +42,31 @@ there is nothing to quote.
 - **It drops** what makes shell scripts fragile: values split and
   globbed again, `$IFS`, `test` and `[ ... ]`, and quoting to keep a
   value whole.
-- **At the prompt** it has its own line editor, with highlighting as you
-  type, history suggestions, Tab completion with a menu, and "did you
-  mean".
 
-## Install
+*Concha* is Spanish for a seashell, and a shell is what concha is. The
+emblem is a conch tipped on its side, with a shell's prompt, `>_`,
+waiting in its opening.
+
+<p align="center"><img src="doc/img/logo.svg" alt="a cream and coral conch on a dark tile, a >_ prompt in its opening" width="128"></p>
+
+## See it
+
+<p align="center">
+  <img src="doc/img/demo.gif" alt="concha at its prompt: ls highlighted as typed, a capture and arithmetic, a two-line for loop over glob, ehco corrected to echo, and Tab completing a file name" width="720">
+</p>
+
+Above, concha at its prompt: a command highlighted as it is typed, a
+capture and some arithmetic, a loop over `glob` typed on two lines (the
+`. ` prompt asks for the rest), a typo that gets "did you mean echo?"
+and the fix offered, dim, as the next line, and Tab's menu completing a
+file name. `doc/demo.cast` is the same session as an asciinema
+recording (`asciinema play doc/demo.cast`). `make cast` makes both from
+`doc/demo.keys`: `tests/Play.raz` types the keys into concha on a
+pseudo-terminal at a person's pace, with the times counted from the
+pauses rather than read from the clock, and `tests/cast.cn` draws the
+GIF from the cast. The same keys give the same cast and the same GIF.
+
+## Get it
 
 concha is written in [raz](https://raz.lucelad.workers.dev), and builds
 with the version the `Makefile` names (`RAZVERSION`); `make` warns if
@@ -58,13 +81,25 @@ with `make install` in its checkout (it goes to `~/.raz/lib`).
 `PREFIX`, `DESTDIR`, `BINDIR`, `MANDIR`, `DATADIR` and `RAZ` can be set
 on the command line; see the `Makefile`.
 
-    concha                     interactive; reads ~/.concharc first
-    concha script.cn a b       run a script; its arguments are in args
-    concha -c 'text' a b       run text
-    concha -n script.cn        check the syntax, run nothing
-    ... | concha               run standard input
+| command | does |
+|---|---|
+| `concha` | the prompt; reads `~/.concharc` first |
+| `concha script.cn a b` | runs a script, with `a` and `b` in `args` |
+| `concha -c 'text' a b` | runs text |
+| `concha -n script.cn` | checks the syntax and runs nothing |
+| `concha -q kind script.cn` | answers an editor ([below](#for-editors)) |
+| `... \| concha` | runs standard input |
+| `concha --version`, `concha -h` | the version, the usage |
 
-## A tour
+## Learn it
+
+`man concha-tutorial` is a tour for people who already use a shell,
+with a table translating sh to concha; `man concha` is the whole
+reference, and `man concha-complete` the completion files.
+[examples/](examples/) holds short commented scripts, and
+[examples/concharc](examples/concharc) a `~/.concharc` to start from,
+whose prompt counts the lines changed in a git or sauce tree. What
+follows is the short of it.
 
 ### Two kinds of statement
 
@@ -184,7 +219,7 @@ the script with `concha: f.cn:12: errexit: grep -q x (status 1)`.
   `environ() getenv(name) setenv(name, value)`, `now()
   time(fmt[, ms])` and `completions(line)`.
 
-## At the prompt
+### At the prompt
 
 - **Editing** has the usual keys: the arrows, `^A` `^E` `^B` `^F`,
   `Alt-b` `Alt-f`, `^W` `Alt-d` `^U` `^K`, `^Y` to put back what was
@@ -213,7 +248,7 @@ the script with `concha: f.cn:12: errexit: grep -q x (status 1)`.
   `fg` and `bg` go on with one in the foreground or the background, and
   `disown` lets one outlive the terminal.
 
-## For editors
+### For editors
 
 concha answers questions about a script without running it, one line a
 thing and its fields split by tabs. They are what concha-lsp(1)
@@ -225,22 +260,82 @@ errors, an outline, completion, hover and go to definition.
     concha -q words f.cn:3:1      what can be typed there
     concha -q def f.cn:3:1        where the routine named there is declared
 
-## Documentation
+## How it works
 
-- `man ./doc/concha.1`: the whole reference.
-- `man ./doc/concha-tutorial.7`: a tour for shell users, with a table
-  translating sh to concha.
-- `man ./doc/concha-complete.5`: the completion files.
-- [examples/](examples/): short commented scripts, and
-  [examples/concharc](examples/concharc), a `~/.concharc` to start from,
-  whose prompt counts the lines changed in a git or sauce tree.
-- [doc/internals.md](doc/internals.md): how it works, for people
-  changing it.
+Five ideas, a module each. Read them in this order; each module
+depends only on those before it.
 
-## About
+1. **Values, not words** (`src/Ccore.raz`). A value is `nil`, a
+   boolean, an integer, a string or a list, and it stays one value
+   wherever it goes: `$x` is one argument, or one per item of a list,
+   and nothing is split or globbed again. Scratch values live in an
+   arena released after every statement, so a long loop runs in flat
+   memory. An error is raz's `ERROR`, passed up with `try`.
+2. **Two worlds in one scanner** (`src/Csyntax.raz`). A line that
+   starts with a keyword, `name :=` or `name(` is Pascal; any other
+   is a command, read word by word. One scanner switches between the
+   two, so a capture can hold commands inside a Pascal expression and
+   `$(expr)` can hold Pascal inside a command word. A script is parsed
+   whole before it runs, and the parser keeps notes for the queries.
+3. **Names, patterns, time** (`src/Cvars.raz`, `src/Cglob.raz`,
+   `src/Cclock.raz`). Variables in frames, procedures, `PATH` and the
+   "did you mean" that names the one close misspelling; globbing; and
+   `time()`'s format, with local time from
+   [rzone](https://github.com/ldiaz94/rzone).
+4. **Run what can run in the shell** (`src/Cinterp.raz`). Procedures,
+   blocks and builtins run in the shell itself, so they can change its
+   variables; only programs, pipeline stages and captures get a child.
+   It does processes, pipes, redirections, `<(...)`, job control,
+   signals, `errexit` and the builtins.
+5. **An editor that knows the language** (`src/Cfuzzy.raz`,
+   `src/Ccomplete.raz`, `src/Cedit.raz`). The line editor colours the
+   line with the parser's own reading of it, so the colour is never
+   wrong about what will run; Tab ranks completions with a fuzzy
+   matcher, and reads concha-complete(5) files without running
+   anything. `src/Concha.raz` ties it together: the command line, the
+   prompt, startup and the `-q` queries.
 
-About 9,800 lines of raz, with nothing under them but raz's library: no
-libc. Scratch values live in an arena that is released after every
-statement, so memory stays flat in long loops. concha was first written
-in Free Pascal, and ported to raz with its language kept exactly as it
-was; [doc/internals.md](doc/internals.md) tells how. ISC licence.
+[doc/internals.md](doc/internals.md) goes deeper, for people changing
+concha.
+
+## Correctness and tests
+
+- `tests/test.cn` holds 370 checks, run by `make test` under the
+  concha just built: the language, expansion, redirections, pipes,
+  jobs, signals, traps, `errexit`, completion and the queries. Each
+  builtin's usage is checked against the man page.
+- `make test` also parses every script in `examples/` with `-n` and
+  checks the three man pages with `groff -ww`, which must give no
+  warnings.
+- The build uses `raz -Werror`, and `make fmt` checks that `src/` is laid
+  out as raz's formatter lays it out.
+- concha was first written in Free Pascal and ported to raz with its
+  language kept as it was: the same suite passed under both, and the
+  port was the shell of every terminal before the Pascal one was
+  retired. The few differences that were meant are listed at the end
+  of [doc/internals.md](doc/internals.md).
+
+## Size
+
+About 9,700 lines of raz in ten modules: 8,100 of code and 960 of
+comments, as `rloc` counts them (`make loc`). There is nothing under
+it but raz's library: no libc.
+
+## Left out
+
+- **Word splitting, `$IFS`, `[` and `test`, arithmetic expansion,
+  brace expansion and `eval`.** Pascal has values, conditions and
+  expressions, so these have nothing left to do.
+- **`>(list)` and subshell parentheses.** `<(list)` reads a command's
+  output as a file; `begin ... end` groups commands.
+- **Assignments before a command.** `FOO=bar cmd` is the command
+  `FOO=bar`; when it isn't found, concha suggests `env FOO=bar cmd`.
+- **getpwnam(3).** With no libc, `~user` is looked up in `/etc/passwd`
+  only, so users from LDAP and the like are not known.
+- **POSIX sh compatibility.** concha doesn't run sh scripts; `SHELL`
+  stays `/bin/bash` inside it, so programs that run `$SHELL -c` still
+  get sh.
+
+## Licence
+
+ISC. See [LICENSE](LICENSE).
