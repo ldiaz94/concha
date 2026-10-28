@@ -774,7 +774,7 @@ begin
 end;
 
 proc factor: (^Expr, ERROR);
-var e, x: ^Expr; l: Parts.Vec;
+var e, x: ^Expr; l: Parts.Vec; nm: []const U8;
 begin
     match tok of
     | tInt:
@@ -834,7 +834,12 @@ begin
                 e^.args := try exprList(tRP, "expected )");
             end;
         end;
-    | else: return nil, tokErr("expected an expression");
+    | else:
+        if (at(tokPos) = '$') and isIdStart(at(tokPos + 1)) then    (* $ is for command words *)
+            nm := src[tokPos + 1..identEnd(tokPos + 1)];
+            return nil, tokErr(Ccore.text("write {}, not ${}, in an expression", [Fmt.str(nm), Fmt.str(nm)]));
+        end;
+        return nil, tokErr("expected an expression");
     end;
     while tok = tLB do
         x := newExpr(eIndex);

@@ -23,6 +23,8 @@
 .Nm
 .Fl q Cm words | Cm def
 .Ar script : Ns Ar line : Ns Ar column
+.Nm
+.Fl h | -help
 .Sh DESCRIPTION
 A tour for people who already use a Unix shell is
 .Xr concha-tutorial 7 .
@@ -105,6 +107,11 @@ it opens nothing but
 and runs nothing.
 The queries are listed in
 .Sx QUERIES .
+.Pp
+.Fl h
+or
+.Fl -help
+prints a summary of these forms and exits.
 .Sh STATEMENTS AND COMMANDS
 Each statement is one of two kinds, and the start of the line decides
 which:
@@ -995,6 +1002,9 @@ is an error.
 Remove surrounding blanks.
 .It Fn split "s[, sep]"
 List of fields; with no separator, split on runs of blanks.
+An empty
+.Ar s
+gives the empty list, not a list of one empty string.
 .It Fn join "l[, sep]"
 One string, separated by a space by default.
 .It Fn lines s

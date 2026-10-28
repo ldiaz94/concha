@@ -188,6 +188,7 @@ in a capture
 EOF`
 check('heredoc in a capture', x, 'in a capture')
 check('args as a parameter', `$cn -c "procedure p(w, args); begin echo \$args end; p('x', ['a', 'b'])"`, 'a b')
+check('dollar in an expression', `$cn -c 'writeln($f)' 2>&1`, 'concha: 1: write f, not $f, in an expression')
 check('unknown routine writeln arg', `$cn -c 'writeln(nosuch(1))' 2>&1`, 'concha: 1: unknown routine nosuch')
 check('command style unaffected', `$cn -c 'procedure greet(n); begin echo hi $n end; greet bob'`, 'hi bob')
 
