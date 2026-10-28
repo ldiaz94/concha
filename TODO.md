@@ -58,6 +58,15 @@ Findings for the user to schedule; not part of PLAN.md.
   A call to a procedure should give it its own status (0 unless it
   runs a command that fails), not the last one seen. blick's
   `test/check.cn` captures with `|| true` instead (2026-10-23).
+  Nothing needs to turn errexit off: a capture is exempt, but its
+  status still stands, and the next statement that is a call, even
+  `writeln`, takes it as its own. Exits 1 after `a`:
+
+      concha -c 'errexit := true; x := `false`; writeln("a"); writeln("b")'
+
+  So a script under errexit can't read a failed capture's status and
+  then print: `writeln(`diff a b`)` ends it too. huh's `test/check.cn`
+  runs `true` after each such capture (2026-10-28).
 - errexit ends a script with no word: no file, line or command. The
   case above was found only by adding echo lines until it moved; a
   message on stderr like `script.cn:12: errexit: p() (status 1)`
