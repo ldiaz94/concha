@@ -153,7 +153,10 @@ variables; in the middle of a pipeline they run in a child, and can't.
 ### Status
 
 After each command, `status` holds its exit code, 128+n if signal n
-killed it. Pascal statements leave it alone.
+killed it. Pascal statements leave it alone, but a call made as a
+statement is a command: `writeln(...)` has status 0, and a procedure the
+status of the last command it ran. Under `errexit` a failed command ends
+the script with `concha: f.cn:12: errexit: grep -q x (status 1)`.
 
     grep -q root /etc/passwd
     if status = 0 then writeln('yes')

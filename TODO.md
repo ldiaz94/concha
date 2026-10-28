@@ -33,44 +33,6 @@ Findings for the user to schedule.
   "expected an expression". The rule (`$` for command words, the bare
   name in expressions) is right; the message could name it, e.g.
   "write f, not $f, in an expression" (2026-10-20).
-- A failed capture's status outlives `errexit := false`. A function
-  that turns errexit off, captures a failing command and turns it
-  back on leaves `status` at 1 (`Cinterp.raz` `Cvars.setStatus(waitFor(pid))`
-  in the capture), since Pascal statements leave it alone; the next
-  procedure-call statement is an `sCmd` and takes that stale 1 as its
-  own, and `execStmt` ends the script by errexit. Exits 1 after `a`:
-
-      errexit := true
-      function quiet;
-      begin
-        errexit := false
-        result := `false`
-        errexit := true
-      end;
-      procedure p;
-      begin
-        x := quiet()
-      end;
-      echo a
-      p()
-      echo b
-
-  A call to a procedure should give it its own status (0 unless it
-  runs a command that fails), not the last one seen. blick's
-  `test/check.cn` captures with `|| true` instead (2026-10-23).
-  Nothing needs to turn errexit off: a capture is exempt, but its
-  status still stands, and the next statement that is a call, even
-  `writeln`, takes it as its own. Exits 1 after `a`:
-
-      concha -c 'errexit := true; x := `false`; writeln("a"); writeln("b")'
-
-  So a script under errexit can't read a failed capture's status and
-  then print: `writeln(`diff a b`)` ends it too. huh's `test/check.cn`
-  runs `true` after each such capture (2026-10-28).
-- errexit ends a script with no word: no file, line or command. The
-  case above was found only by adding echo lines until it moved; a
-  message on stderr like `script.cn:12: errexit: p() (status 1)`
-  would have found it at once (2026-10-23).
 - `args` as a procedure parameter name: `procedure p(want, args)` binds
   the parameter, but every call then overwrites it with the full
   argument list (`man concha`: "Every call also receives the full
@@ -80,21 +42,6 @@ Findings for the user to schedule.
   never says a parameter may not be called `args`; the call should
   either bind the declared parameter or `-n` should reject the name
   (found in desh's `test/run.cn`, 2026-10-23).
-- The stale status after `errexit := false` is not only a capture's: a
-  plain failing command does it too, and any later statement that
-  leaves `status` alone ends the script silently once `errexit := true`
-  is set. Exits 1 after `w`, `next` never printed (2026-10-23):
-
-      errexit := false
-      false
-      errexit := true
-      writeln('w')
-      echo next
-
-  `x := 1` instead of the `writeln` is fine; the exit is at the
-  `writeln` statement, not at the assignment. bash's `set +e; false;
-  set -e` does not exit on re-enabling, and its next command resets
-  `$?`. Seen in lolo's `test/run.cn`.
 - A heredoc inside a backtick capture is refused with "unterminated
   heredoc" (exit 2), though the same heredoc as a plain command works:
 

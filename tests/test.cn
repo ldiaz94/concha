@@ -175,8 +175,10 @@ rmdir $m000
 cd $homedir
 
 { unknown routines }
-check('unknown routine stmt', `$cn -c 'nosuch(1)' 2>&1`, 'concha: 1: unknown routine nosuch')
-check('unknown routine stmt status', status, 2)
+out := `$cn -c 'nosuch(1)' 2>&1`
+st := status
+check('unknown routine stmt', out, 'concha: 1: unknown routine nosuch')
+check('unknown routine stmt status', st, 2)
 check('unknown routine assign', `$cn -c 'x := nosuch(1)' 2>&1`, 'concha: 1: unknown routine nosuch')
 check('unknown routine writeln arg', `$cn -c 'writeln(nosuch(1))' 2>&1`, 'concha: 1: unknown routine nosuch')
 check('command style unaffected', `$cn -c 'procedure greet(n); begin echo hi $n end; greet bob'`, 'hi bob')
@@ -364,13 +366,17 @@ check('pid read-only', `$cn -c 'pid := 1' 2>&1`, 'concha: 1: pid: read-only vari
 
 { errexit and pipefail }
 check('errexit off', `false; echo on`, 'on')
-check('errexit stops', `$cn -c 'errexit := true; echo a; false; echo b'; writeln(status)`, 'a'#10'1')
+check('errexit stops', `$cn -c 'errexit := true; echo a; false; echo b' 2>/dev/null; writeln(status)`, 'a'#10'1')
 check('errexit left of &&', `$cn -c 'errexit := true; false && echo x; echo c'`, 'c')
-check('errexit right of ||', `$cn -c 'errexit := true; false || false; echo no'; writeln(status)`, '1')
-check('errexit right of &&', `$cn -c 'errexit := true; true && false; echo no'; writeln(status)`, '1')
+check('errexit right of ||', `$cn -c 'errexit := true; false || false; echo no' 2>/dev/null; writeln(status)`, '1')
+check('errexit right of &&', `$cn -c 'errexit := true; true && false; echo no' 2>/dev/null; writeln(status)`, '1')
 check('errexit capture', `$cn -c 'errexit := true; x := `false; echo in`; echo $x'`, 'in')
 check('errexit proc left of ||', `$cn -c 'errexit := true; procedure f; begin false; echo in end; f || echo; echo out'`, 'in'#10'out')
-check('errexit exit trap', `$cn -c 'procedure bye; begin echo bye $status end; trap bye EXIT; errexit := true; sh -c "exit 7"; echo no'; writeln(status)`, 'bye 7'#10'7')
+check('errexit exit trap', `$cn -c 'procedure bye; begin echo bye $status end; trap bye EXIT; errexit := true; sh -c "exit 7"; echo no' 2>/dev/null; writeln(status)`, 'bye 7'#10'7')
+check('errexit says where', `$cn -c 'errexit := true; echo a | grep b' 2>&1`, 'concha: 1: errexit: echo a | grep b (status 1)')
+check('errexit call own status', `$cn -c 'errexit := true; x := `false`; writeln(status); writeln("b")'`, '1'#10'b')
+check('errexit off then on', `$cn -c 'errexit := false; false; errexit := true; writeln("w"); echo b'`, 'w'#10'b')
+check('errexit proc own status', `$cn -c 'errexit := true; function q; begin errexit := false; result := `false`; errexit := true end; procedure p; begin x := q() end; p(); echo b'`, 'b')
 false | true
 check('pipefail off', status, 0)
 pipefail := true

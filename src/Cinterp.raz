@@ -130,6 +130,7 @@ var
     exempt: INT;    (* above 0, a failure doesn't trigger errexit *)
     inPromptProc: BOOL;    (* the prompt procedure runs *)
     chainSkipped: BOOL;    (* the last pipeline of the chain didn't run *)
+    bodySt: INT;    (* the status of the running body's last command statement *)
 
 proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
 proc execList(l: []^Csyntax.Stmt): ERROR; forward;
@@ -1024,7 +1025,7 @@ end;
    parameters, args, the whole list, and for a function result, which
    is what it answers. *)
 proc callProc(def: ^Csyntax.Stmt; args: []Ccore.Val): (Ccore.Val, ERROR);
-var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i: INT; err: ERROR;
+var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i, outer: INT; err: ERROR;
 begin
     f := try Cvars.enter();
     up := curFunc;
@@ -1036,8 +1037,12 @@ begin
     end;
     Cvars.local("args")^.v := Ccore.keep(listOf(args));
     if def^.isFunc then _ := Cvars.local("result"); end;
+    outer := bodySt;
+    bodySt := 0;
     err := execStmt(def^.body);
     ctl := cNone;
+    Cvars.setStatus(bodySt);    (* its own, not a capture's nor the caller's *)
+    bodySt := outer;
     if def^.isFunc and (err = nil) then
         r := Cvars.findLocal("result");    (* gone if the body unset it *)
         if r # nil then v := Ccore.temp(r^.v); end;
@@ -2409,6 +2414,7 @@ begin
     end;
     if c^.call # nil then
         _ := try eval(c^.call);
+        if c^.call^.bi # Csyntax.bNone then Cvars.setStatus(0); end;    (* writeln ran no command *)
         return Cvars.status(), nil;
     end;
     return runArgs(Vals.all(st.args));
@@ -2561,7 +2567,12 @@ begin
     for i := 0 to LEN(pipes) - 1 do
         for j := 0 to LEN(pipes[i].cmds) - 1 do
             c := pipes[i].cmds[j];
-            if (LEN(c^.words) = 0) or (c^.call # nil) then Buf.str(b, "..."); end;
+            if c^.call # nil then
+                Buf.str(b, c^.call^.s);
+                Buf.str(b, "()");
+            elsif LEN(c^.words) = 0 then
+                Buf.str(b, "...");
+            end;
             for k := 0 to LEN(c^.words) - 1 do
                 for m := 0 to LEN(c^.words[k]) - 1 do
                     match c^.words[k][m].kind of
@@ -2620,6 +2631,8 @@ begin
     _ := Sys.setGroup(pid, pid);
     Buf.init(b, Ccore.temps);
     listName(s^.pipes, b);
+    Ccore.where^.line := s^.line;    (* the body it ran may have moved it *)
+    Ccore.where^.file := s^.path;
     pids[0] := pid;
     k := newJob(pids, pid, Buf.bytes(b));
     if interactive then report(k, Ccore.text("{}", [Fmt.int(pid)])); end;
@@ -2794,10 +2807,14 @@ begin
 end;
 
 (* errexit: the end of the script, or of the line at the prompt, with
-   the status. *)
-proc errExit: ERROR;
+   the status of s, the command that failed. A child's parent says so. *)
+proc errExit(s: ^Csyntax.Stmt): ERROR;
+var b: Buf.Buf;
 begin
     if Ccore.opts^.inChild then Sys.exit(Cvars.status()); end;
+    Buf.init(b, Ccore.temps);
+    listName(s^.pipes, b);
+    Ccore.warnOn("errexit", Ccore.text("{} (status {})", [Fmt.str(Buf.bytes(b)), Fmt.int(Cvars.status())]));
     return Ccore.ErrExit;
 end;
 
@@ -2814,7 +2831,8 @@ begin
     match s^.kind of
     | sCmd:
         st := try runAndOr(s);
-        if (st # 0) and (exempt = 0) and not chainSkipped and Cvars.flag("errexit") then return errExit(); end;
+        bodySt := st;
+        if (st # 0) and (exempt = 0) and not chainSkipped and Cvars.flag("errexit") then return errExit(s); end;
     | sAssign:
         v := try eval(s^.e);
         if s^.e2 = nil then try Cvars.assign(s^.s, v); else try setIndex(s, v); end;

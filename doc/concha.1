@@ -724,14 +724,21 @@ holds its exit code: 0 for success, and 128+n if signal
 killed it.
 It is 127 when a command is not found and 126 when a command cannot be
 executed.
-Pascal statements leave it alone.
+Pascal statements leave it alone, but a call made as a statement is a
+command: a builtin such as
+.Fn writeln
+has status 0, and a procedure the status of the last command statement
+it ran, or 0 if it ran none.
+A capture sets
+.Ev status
+to its command's, for the next statement to read.
 .Pp
 A failed command does not stop a script unless
 .Ev errexit
 is
 .Cm true .
 Then a command statement whose status is not 0 ends the script with
-that status, running the
+that status, saying which command it was and where, and running the
 .Cm EXIT
 trap; at the prompt it abandons the rest of the line.
 Commands on the left of
