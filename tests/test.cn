@@ -112,6 +112,18 @@ check('exit after failure', `failexit; writeln(status)`, '1')
 check('exit(e) function', `false; x := exitf(); writeln(x, ' ', status)`, '7 0')
 check('exit(e) script', `$cn -c 'exit(5); echo no'; writeln(status)`, '5')
 check('exit(e) errexit', `$cn -c 'errexit := true; procedure p; begin exit(3) end; p; echo no' 2>/dev/null; writeln(status)`, '3')
+function two; begin result := 2 end;
+function grepped; begin grep -q nomatch /dev/null; result := 5 end;
+function lasttrue; begin false; true; result := 0 end;
+procedure quiet; begin x := 1 end;
+check('function no command', `false; x := two(); writeln(status)`, '1')
+check('expression', `false; y := 1 + 1; writeln(status)`, '1')
+check('function command', `false; z := grepped(); writeln(status)`, '1')
+check('function command ok', `true; z := grepped(); writeln(status)`, '1')
+check('function last command', `false; z := lasttrue(); writeln(status)`, '0')
+check('function in if', `false; if two() = 2 then writeln(status)`, '1')
+check('function call statement', `false; two(); writeln(status)`, '0')
+check('procedure call statement', `false; quiet; writeln(status)`, '0')
 check('herestring', `tr a-z A-Z <<<'up'`, 'UP')
 check('heredoc', `cat <<EOF`, 'n is 8')
   n is $n

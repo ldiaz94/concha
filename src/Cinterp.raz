@@ -28,6 +28,7 @@ const
     MaxSaves = 256;    (* fds saved around a builtin's redirections *)
     MaxSubs = 64;    (* <(...)s open at once *)
     HereMax = 32768;    (* a here string the shell writes itself; a longer one, a child *)
+    NoCmd = -1;    (* bodySt while the running body has run no command statement *)
 
     (* The signals trap takes: EXIT, which isn't one, and the rest *)
     TrapNames: [][]const U8 = ["EXIT", "HUP", "INT", "QUIT", "TERM", "USR1", "USR2"];
@@ -131,7 +132,7 @@ var
     exempt: INT;    (* above 0, a failure doesn't trigger errexit *)
     inPromptProc: BOOL;    (* the prompt procedure runs *)
     chainSkipped: BOOL;    (* the last pipeline of the chain didn't run *)
-    bodySt: INT;    (* the status of the running body's last command statement *)
+    bodySt: INT;    (* the status of the running body's last command statement, or NoCmd *)
 
 proc execStmt(s: ^Csyntax.Stmt): ERROR; forward;
 proc execList(l: []^Csyntax.Stmt): ERROR; forward;
@@ -1034,9 +1035,11 @@ end;
 
 (* The procedure def run with args, in a frame of its own: its
    parameters, args, the whole list, and for a function result, which
-   is what it answers. *)
-proc callProc(def: ^Csyntax.Stmt; args: []Ccore.Val): (Ccore.Val, ERROR);
-var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i, outer: INT; named: BOOL; err: ERROR;
+   is what it answers. Its status is that of the last command statement
+   its body ran; if it ran none, a call made as a command (asCmd) has
+   0, and a function called in an expression leaves status alone. *)
+proc callProc(def: ^Csyntax.Stmt; args: []Ccore.Val; asCmd: BOOL): (Ccore.Val, ERROR);
+var f: Cvars.Frame; up: ^Csyntax.Stmt; at: Ccore.Where; r: ^Cvars.Var; v: Ccore.Val; i, outer, before: INT; named: BOOL; err: ERROR;
 begin
     f := try Cvars.enter();
     up := curFunc;
@@ -1050,11 +1053,18 @@ begin
     end;
     if not named then Cvars.local("args")^.v := Ccore.keep(listOf(args)); end;
     if def^.isFunc then _ := Cvars.local("result"); end;
+    before := Cvars.status();
     outer := bodySt;
-    bodySt := 0;
+    bodySt := NoCmd;
     err := execStmt(def^.body);
     ctl := cNone;
-    Cvars.setStatus(bodySt);    (* its own, not a capture's nor the caller's *)
+    if bodySt # NoCmd then
+        Cvars.setStatus(bodySt);    (* its own, not a capture's nor the caller's *)
+    elsif def^.isFunc and not asCmd then
+        Cvars.setStatus(before);
+    else
+        Cvars.setStatus(0);
+    end;
     bodySt := outer;
     if def^.isFunc and (err = nil) then
         r := Cvars.findLocal("result");    (* gone if the body unset it *)
@@ -1067,7 +1077,8 @@ begin
     return v, nil;
 end;
 
-proc call(e: ^Csyntax.Expr): (Ccore.Val, ERROR);
+(* The call e, made as a command (asCmd) or in an expression. *)
+proc call(e: ^Csyntax.Expr; asCmd: BOOL): (Ccore.Val, ERROR);
 var args: Vals.Vec; def: ^Csyntax.Stmt; i: INT;
 begin
     if e^.bi # Csyntax.bNone then return builtin(e); end;
@@ -1075,7 +1086,7 @@ begin
     for i := 0 to LEN(e^.args) - 1 do Vals.push(args, try eval(e^.args[i])); end;
     def := Cvars.findProc(e^.s);
     if def = nil then return {}, Cvars.unknownRoutine(e^.s); end;
-    return callProc(def, Vals.all(args));
+    return callProc(def, Vals.all(args), asCmd);
 end;
 
 (* ------------------------------------------------------------ traps *)
@@ -1090,7 +1101,7 @@ begin
     if def = nil then
         Ccore.warnOn(traps[i].name, "trap: unknown routine");
     else
-        _ := try callProc(def, []);
+        _ := try callProc(def, [], true);
     end;
     Cvars.setStatus(st);
     Ccore.release(m);
@@ -1298,7 +1309,7 @@ begin
         if r = nil then return {}, Cvars.undefined(e^.s); end;
         return Ccore.temp(r^.v), nil;
     | eIndex: return index(e);
-    | eCall: return call(e);
+    | eCall: return call(e, false);
     | eBin: return binary(e);
     | eNeg: return Ccore.intVal(try Ccore.intNeg(try Ccore.toInt(try eval(e^.a)))), nil;
     | eNot: return Ccore.boolVal(not try Ccore.truth(try eval(e^.a))), nil;
@@ -2427,7 +2438,7 @@ begin
     def := Cvars.findProc(Ccore.bytes(nm));
     if def # nil then
         Cvars.setStatus(0);
-        _ := try callProc(def, a[1..LEN(a)]);
+        _ := try callProc(def, a[1..LEN(a)], true);
         return Cvars.status(), nil;
     end;
     bi := cmdBuiltin(nm);
@@ -2455,7 +2466,7 @@ begin
         return Cvars.status(), nil;
     end;
     if c^.call # nil then
-        _ := try eval(c^.call);
+        if c^.call^.kind = Csyntax.eCall then _ := try call(c^.call, true); else _ := try eval(c^.call); end;
         if c^.call^.bi # Csyntax.bNone then Cvars.setStatus(0); end;    (* writeln ran no command *)
         return Cvars.status(), nil;
     end;
@@ -2975,7 +2986,7 @@ begin
             _ := Sys.dupTo(fd, i);
         end;
         Sys.close(fd);
-        if err = nil then r, err := callProc(def, one); end;
+        if err = nil then r, err := callProc(def, one, true); end;
         if err # nil then
             r := {};
             closeSubs(ns, true);
@@ -3107,7 +3118,7 @@ begin
     def := Cvars.findProc("prompt");
     if custom and (def # nil) then
         inPromptProc := true;
-        _ := try callProc(def, []);
+        _ := try callProc(def, [], true);
         inPromptProc := false;
         return nil;
     end;

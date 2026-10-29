@@ -693,12 +693,16 @@ in a function and
 anywhere else.
 Recursion is limited to a depth of 400.
 .Pp
-Called as a command, a procedure's status is that of the last command
+Called as a command, a routine's status is that of the last command
 statement it ran, or
 .Ar e
 if it left by
-.Cm exit( Ns Ar e Ns Cm ) ;
-it starts at 0.
+.Cm exit( Ns Ar e Ns Cm )
+in a procedure; it starts at 0.
+Called in an expression, a function sets
+.Ev status
+to that of the last command statement it ran, and leaves it alone if
+it ran none.
 A procedure named
 .Ic prompt
 draws the interactive prompt.
@@ -776,6 +780,12 @@ it ran, or
 if it left by
 .Cm exit( Ns Ar e Ns Cm ) ,
 or 0 if it ran none.
+A function called in an expression sets
+.Ev status
+to that of the last command statement it ran, if it ran one, and
+otherwise leaves it alone:
+.Cm "false; x := sq(3)"
+leaves 1.
 A capture sets
 .Ev status
 to its command's, for the next statement to read.

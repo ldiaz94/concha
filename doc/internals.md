@@ -456,6 +456,11 @@ concha, on purpose:
   call keep whatever status came before it, so a failed capture ended
   an errexit script at the next `writeln`. errexit now names the
   command, file and line.
+- **A function in an expression leaves status alone** unless it ran
+  a command statement (2026-10-29): `false; x := two()` leaves 1. It
+  used to set it like a call statement, to 0 when it ran no command,
+  so a function wiped a status though no command ran. A function
+  called as a statement keeps the call statement's rule.
 - **Stricter parsing** (2026-10-28): an assignment must end its
   statement (`x := 1 echo hi` is an error), and a procedure may be
   declared among a procedure's `var` sections.
