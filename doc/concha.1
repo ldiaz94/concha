@@ -116,7 +116,7 @@ or
 prints a summary of these forms and exits.
 .Fl -version
 prints the version, as
-.Ql concha 1.0.0 ,
+.Ql concha 1.0.1 ,
 and exits.
 .Sh STATEMENTS AND COMMANDS
 Each statement is one of two kinds, and the start of the line decides
@@ -448,6 +448,20 @@ Run
 if
 .Ar a
 failed.
+.It Ar a No || Ar x No := Ar e
+An assignment may end a list of
+.Cm &&
+and
+.Cm || ,
+run as
+.Ar b
+would be; it leaves
+.Va status
+at 0.
+So
+.Ql cmd || rc := status
+keeps a failing command's status, even under
+.Va errexit .
 .It Ar a No &
 Run in the background.
 Its process id goes into

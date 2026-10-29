@@ -2451,6 +2451,7 @@ proc inProc(c: ^Csyntax.Cmd; var st: Stage): (INT, ERROR);
 begin
     if c^.stmt # nil then
         try execStmt(c^.stmt);
+        if c^.stmt^.kind = Csyntax.sAssign then Cvars.setStatus(0); end;    (* cmd || rc := status *)
         return Cvars.status(), nil;
     end;
     if c^.call # nil then

@@ -28,7 +28,7 @@ import Sys, Files, Fmt, Buf, Heap, Ccore, Csyntax, Cvars, Cedit, Ccomplete, Cint
 
 const
     Usage = "usage: concha [-il]\n       concha script [arg ...]\n       concha -c text [arg ...]\n       concha -n [script]\n       concha -q check|outline|words|def script\n       concha -h | --help\n       concha --version\n";
-    Version = "concha 1.0.0\n";    (* as the release is tagged, v1.0.0 *)
+    Version = "concha 1.0.1\n";    (* as the release is tagged, v1.0.1 *)
     QueryUsage = "usage: concha -q check|outline|words|def script\n";
 
     (* The colours a prompt may use, as variables of these names *)

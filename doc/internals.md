@@ -460,3 +460,7 @@ concha, on purpose:
   declared among a procedure's `var` sections.
 - **unicode, chars and hex**, three builtins the Pascal lacked; `ord`
   and `chr` still work on bytes.
+- **An assignment may end a && or || list** (2026-10-29, 1.0.1):
+  `cmd || rc := status` keeps a failing command's status even under
+  `errexit`, and the assignment leaves `status` at 0. The Pascal took
+  no assignment there (`rc` was run as a command).

@@ -120,6 +120,13 @@ if status = 0 then echo 'still work to do'
 and
 .Cm ||
 still work, and are shorter for one-liners.
+An assignment may end such a list, which keeps a failure's status
+even when
+.Va errexit
+is on:
+.Bd -literal -offset indent
+make || rc := status
+.Ed
 .Sh 5. PROCEDURES ARE COMMANDS
 .Bd -literal -offset indent
 procedure mkcd(dir);
@@ -312,6 +319,7 @@ to turn all colour off.
 .It Cm "f() { ...; }" Ta Cm "procedure f; begin ... end;"
 .It Cm "$1, $#, $@" Ta Cm "args[0], length(args), $args"
 .It Cm $? Ta Cm status
+.It Cm "cmd || rc=$?" Ta Cm "cmd || rc := status"
 .It Cm $$ Ta Cm pid
 .It Cm $! Ta Cm lastpid
 .It Cm "${x:-default}" Ta Cm "if not defined('x') then x := 'default'"

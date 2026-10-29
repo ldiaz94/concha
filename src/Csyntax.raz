@@ -1008,6 +1008,7 @@ end;
 (* -------------------------------------------------------- commands *)
 
 proc parseStmt: (^Stmt, ERROR); forward;
+proc parseAssign(e: INT): (^Stmt, ERROR); forward;
 
 proc newStmt(k: StmtKind): ^Stmt;
 var s: ^Stmt;
@@ -1335,10 +1336,27 @@ begin
     return p, nil;
 end;
 
+(* An assignment that ends a && or || list, as the one command of its
+   pipeline: cmd || rc := status. *)
+proc assignPipe(a: ^Stmt): Pipe;
+var c: ^Cmd; v: Cmds.Vec; p: Pipe;
+begin
+    NEW(c, Heap.heap);
+    if c = nil then Rt.stop("concha: out of memory\n"); end;
+    c^.line := a^.line;
+    c^.path := srcName;
+    c^.stmt := a;
+    Cmds.init(v, Heap.heap);
+    Cmds.push(v, c);
+    p.cmds := Cmds.all(v);
+    return p;
+end;
+
 (* A command statement: pipelines joined by && and ||, and a & after them
-   to run them in the background. *)
+   to run them in the background. The last of the list may be an
+   assignment, which ends the statement. *)
 proc parseCmdStmt: (^Stmt, ERROR);
-var s: ^Stmt; v: Pipes.Vec; p: Pipe;
+var s, a: ^Stmt; v: Pipes.Vec; p: Pipe; e: INT;
 begin
     s := newStmt(sCmd);
     Pipes.init(v, Heap.heap);
@@ -1353,6 +1371,13 @@ begin
         adv;
         adv;
         nlBlank;
+        e := identEnd(pos);
+        a := nil;
+        if e > pos then a := try parseAssign(e); end;
+        if a # nil then
+            Pipes.push(v, assignPipe(a));
+            break;
+        end;
     end;
     if ch() = '&' then
         adv;

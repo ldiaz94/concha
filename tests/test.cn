@@ -390,6 +390,10 @@ check('errexit proc left of ||', `$cn -c 'errexit := true; procedure f; begin fa
 check('errexit exit trap', `$cn -c 'procedure bye; begin echo bye $status end; trap bye EXIT; errexit := true; sh -c "exit 7"; echo no' 2>/dev/null; writeln(status)`, 'bye 7'#10'7')
 check('errexit says where', `$cn -c 'errexit := true; echo a | grep b' 2>&1`, 'concha: 1: errexit: echo a | grep b (status 1)')
 check('errexit call own status', `$cn -c 'errexit := true; x := `false`; writeln(status); writeln("b")'`, '1'#10'b')
+check('errexit status kept by ||', `$cn -c 'errexit := true; false || rc := status; writeln(rc, " ", status)'`, '1 0')
+check('assignment ends && list', `$cn -c 'true && x := 5; writeln(x)'`, '5')
+check('assignment skipped by &&', `$cn -c 'x := 0; false && x := 5; writeln(x)'`, '0')
+check('assignment ends the list', `$cn -c 'false || x := 1 && true' 2>&1`, 'concha: 1: unexpected '#39'&'#39)
 check('errexit off then on', `$cn -c 'errexit := false; false; errexit := true; writeln("w"); echo b'`, 'w'#10'b')
 check('errexit proc own status', `$cn -c 'errexit := true; function q; begin errexit := false; result := `false`; errexit := true end; procedure p; begin x := q() end; p(); echo b'`, 'b')
 false | true
@@ -646,7 +650,7 @@ check('-q unknown kind', `$cn -q nosuch $qdir/good.cn 2>&1; echo $status`,
 check('-q no script', `$cn -q check 2>/dev/null; echo $status`, '2')
 check('-q unreadable', `$cn -q check $qdir/none.cn 2>/dev/null; echo $status`, '2')
 check('usage names -q', '-q check' in `$cn --help`, true)
-check('version', `$cn --version`, 'concha 1.0.0')
+check('version', `$cn --version`, 'concha 1.0.1')
 
 { -q outline: procs and funcs at any depth, vars outside them }
 writeln('var a := 1, b'#10'export E := "x"'#10'procedure outer(x)'#10 +
