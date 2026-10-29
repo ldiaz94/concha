@@ -693,8 +693,12 @@ in a function and
 anywhere else.
 Recursion is limited to a depth of 400.
 .Pp
-Called as a command, a procedure's status is the last command status
-it left; it starts at 0.
+Called as a command, a procedure's status is that of the last command
+statement it ran, or
+.Ar e
+if it left by
+.Cm exit( Ns Ar e Ns Cm ) ;
+it starts at 0.
 A procedure named
 .Ic prompt
 draws the interactive prompt.
@@ -767,7 +771,11 @@ Pascal statements leave it alone, but a call made as a statement is a
 command: a builtin such as
 .Fn writeln
 has status 0, and a procedure the status of the last command statement
-it ran, or 0 if it ran none.
+it ran, or
+.Ar e
+if it left by
+.Cm exit( Ns Ar e Ns Cm ) ,
+or 0 if it ran none.
 A capture sets
 .Ev status
 to its command's, for the next statement to read.

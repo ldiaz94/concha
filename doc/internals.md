@@ -452,9 +452,10 @@ concha, on purpose:
   on it; now the cursor is at the end.
 - **A call statement has a status of its own** (2026-10-28): a
   builtin's is 0, a procedure's that of the last command statement it
-  ran. The Pascal let a call keep whatever status came before it, so a
-  failed capture ended an errexit script at the next `writeln`. errexit
-  now names the command, file and line.
+  ran, or e if it left by `exit(e)` (2026-10-29). The Pascal let a
+  call keep whatever status came before it, so a failed capture ended
+  an errexit script at the next `writeln`. errexit now names the
+  command, file and line.
 - **Stricter parsing** (2026-10-28): an assignment must end its
   statement (`x := 1 echo hi` is an error), and a procedure may be
   declared among a procedure's `var` sections.

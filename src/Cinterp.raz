@@ -2834,7 +2834,7 @@ begin
 end;
 
 (* exit, or exit(e): in a function e is the result, elsewhere the
-   status. *)
+   status, and in a procedure the status its call leaves. *)
 proc execExit(s: ^Csyntax.Stmt): ERROR;
 var v: Ccore.Val;
 begin
@@ -2844,6 +2844,7 @@ begin
             try Cvars.assign("result", v);
         else
             Cvars.setStatus(INT(I32(try Ccore.toInt(v))));
+            bodySt := Cvars.status();
         end;
     end;
     ctl := cExit;

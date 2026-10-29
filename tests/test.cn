@@ -102,6 +102,16 @@ false
 check('status', status, 1)
 false || true && echo ok > /dev/null
 check('and or', status, 0)
+procedure exits(e); begin exit(e); false end;
+procedure exitsin; begin exits(4); writeln(status); true end;
+procedure failexit; begin false; exit; true end;
+function exitf; begin true; exit(7) end;
+check('exit(e) proc status', `exits(3); writeln(status)`, '3')
+check('exit(e) nested', `exitsin; writeln(status)`, '4'#10'0')
+check('exit after failure', `failexit; writeln(status)`, '1')
+check('exit(e) function', `false; x := exitf(); writeln(x, ' ', status)`, '7 0')
+check('exit(e) script', `$cn -c 'exit(5); echo no'; writeln(status)`, '5')
+check('exit(e) errexit', `$cn -c 'errexit := true; procedure p; begin exit(3) end; p; echo no' 2>/dev/null; writeln(status)`, '3')
 check('herestring', `tr a-z A-Z <<<'up'`, 'UP')
 check('heredoc', `cat <<EOF`, 'n is 8')
   n is $n
