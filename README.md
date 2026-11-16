@@ -68,7 +68,7 @@ GIF from the cast. The same keys give the same cast and the same GIF.
 
 ## Get it
 
-concha is written in [raz](https://raz.lucelad.workers.dev), and builds
+concha is written in [raz](https://raz.lucela.org), and builds
 with the version the `Makefile` names (`RAZVERSION`); `make` warns if
 the `raz` on your `PATH` is another. It needs
 [rzone](https://github.com/ldiaz94/rzone), for local time, installed first
