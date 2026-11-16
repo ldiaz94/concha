@@ -336,6 +336,10 @@ it but raz's library: no libc.
   stays `/bin/bash` inside it, so programs that run `$SHELL -c` still
   get sh.
 
+## Contributing
+
+Defect reports are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how.
+
 ## Licence
 
 ISC. See [LICENSE](LICENSE).
